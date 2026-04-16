@@ -1,0 +1,29 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# NDK
+*.o
+*.so
+*.a
+obj/
+
+# Secrets
+app/release/*.jks
+app/debug.keystore
+keystore.properties
+
+# OS
+Thumbs.db

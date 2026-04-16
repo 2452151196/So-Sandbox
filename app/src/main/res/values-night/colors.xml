@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Night mode overrides -->
+    <color name="bg_dark">#FF121212</color>
+    <color name="bg_card">#FF1E1E1E</color>
+    <color name="bg_surface">#FF2A2A2A</color>
+    <color name="text_primary">#FFFAFAFA</color>
+    <color name="text_secondary">#FFB0B0B0</color>
+    <color name="divider">#FF333333</color>
+    <color name="toolbar_bg">#FF1E1E1E</color>
+    <color name="tab_bg">@color/toolbar_bg</color>
+
+    <!-- Section buttons - Night mode -->
+    <color name="section_bar_bg">#FF1A1A2E</color>
+    <color name="section_btn_bg">#FF2A2A4A</color>
+    <color name="section_btn_active_bg">@color/accent</color>
+    <color name="section_btn_text">#FFCCCCCC</color>
+    <color name="section_btn_active_text">#FFFFFFFF</color>
+    <color name="section_divider">#FF333355</color>
+
+    <!-- FlowChart - Night mode -->
+    <color name="chart_bg">#FF1B1B2F</color>
+    <color name="chart_box_bg">#FF162447</color>
+    <color name="chart_header_bg">#FF1F4068</color>
+    <color name="chart_border">#FF3D5A80</color>
+    <color name="chart_text">#FFD4D4D4</color>
+    <color name="chart_shadow">#40000000</color>
+
+    <!-- Main page palette (night) -->
+    <color name="main_page_bg">#FF090C12</color>
+    <color name="main_accent">#FF00C6EE</color>
+    <color name="main_open_btn_bg">#FF0E1B2C</color>
+    <color name="main_open_btn_stroke">#FF233A54</color>
+    <color name="main_card_bg">#FF1A1C2A</color>
+    <color name="main_chip_bg">#FF2A344A</color>
+    <color name="main_feature_card_bg">#FF111A2A</color>
+    <color name="main_feature_card_stroke">#FF22344F</color>
+    <color name="main_log_bg">#FF0D1220</color>
+
+    <!-- Code highlight colors - Night mode -->
+    <color name="code_text">#FFD4D4D4</color>
+    <color name="code_bg">#FF1E1E1E</color>
+    <color name="code_addr">#FF858585</color>
+    <color name="code_insn">#FF569CD6</color>
+    <color name="code_branch">#FFCE9178</color>
+    <color name="code_reg">#FF9CDCFE</color>
+    <color name="code_imm">#FFB5CEA8</color>
+    <color name="code_comment">#FF6A9955</color>
+    <color name="code_string">#FFCE9178</color>
+    <color name="code_plt">#FFDCDCAA</color>
+    <color name="code_keyword">#FFC586C0</color>
+    <color name="code_type">#FF4EC9B0</color>
+    <color name="code_func">#FFDCDCAA</color>
+    <color name="code_num">#FFB5CEA8</color>
+</resources>

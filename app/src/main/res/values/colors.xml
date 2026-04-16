@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- Light mode -->
+    <color name="bg_dark">#FFF5F5F5</color>
+    <color name="bg_card">#FFFFFFFF</color>
+    <color name="bg_surface">#FFEEEEEE</color>
+    <color name="text_primary">#FF212121</color>
+    <color name="text_secondary">#FF757575</color>
+    <color name="divider">#FFE0E0E0</color>
+    <color name="toolbar_bg">#FFFFFFFF</color>
+    <color name="tab_bg">@color/toolbar_bg</color>
+
+    <!-- Section buttons -->
+    <color name="section_bar_bg">@color/bg_surface</color>
+    <color name="section_btn_bg">#FFE0E0E0</color>
+    <color name="section_btn_active_bg">@color/accent</color>
+    <color name="section_btn_text">#FF424242</color>
+    <color name="section_btn_active_text">#FFFFFFFF</color>
+    <color name="section_divider">@color/divider</color>
+
+    <!-- FlowChart -->
+    <color name="chart_bg">#FFF0F0F5</color>
+    <color name="chart_box_bg">#FFFFFFFF</color>
+    <color name="chart_header_bg">#FFE8EAF6</color>
+    <color name="chart_border">#FFBDBDBD</color>
+    <color name="chart_text">#FF212121</color>
+    <color name="chart_shadow">#20000000</color>
+
+    <!-- Shared accent - Modern Teal/Cyan -->
+    <color name="accent">#FF009688</color>
+    <color name="accent_variant">#FF00796B</color>
+    <color name="accent_light">#FF4DB6AC</color>
+    <color name="orange_accent">#FFFF9800</color>
+    <color name="red_error">#FFEF5350</color>
+    <color name="green_success">#FF66BB6A</color>
+
+    <!-- Main page palette (light) -->
+    <color name="main_page_bg">#FFF4F7FB</color>
+    <color name="main_accent">#FF00B8E6</color>
+    <color name="main_open_btn_bg">#FFEAF7FF</color>
+    <color name="main_open_btn_stroke">#FFCAE8F7</color>
+    <color name="main_card_bg">#FFFFFFFF</color>
+    <color name="main_chip_bg">#FFE9F4FF</color>
+    <color name="main_feature_card_bg">#FFFFFFFF</color>
+    <color name="main_feature_card_stroke">#FFDDE6F0</color>
+    <color name="main_log_bg">#FFFFFFFF</color>
+
+    <!-- Code highlight colors - Light mode -->
+    <color name="code_text">#FF212121</color>
+    <color name="code_bg">#FFF8F8F8</color>
+    <color name="code_addr">#FF999999</color>
+    <color name="code_insn">#FF0000CC</color>
+    <color name="code_branch">#FFCC6600</color>
+    <color name="code_reg">#FF006699</color>
+    <color name="code_imm">#FF098658</color>
+    <color name="code_comment">#FF6A9955</color>
+    <color name="code_string">#FFA31515</color>
+    <color name="code_plt">#FF795E26</color>
+    <color name="code_keyword">#FFAF00DB</color>
+    <color name="code_type">#FF267F99</color>
+    <color name="code_func">#FF795E26</color>
+    <color name="code_num">#FF098658</color>
+
+    <!-- Legacy alias -->
+    <color name="cyan_500">@color/accent</color>
+    <color name="cyan_700">@color/accent_variant</color>
+
+    <!-- Input colors -->
+    <color name="bg_input">#FFF5F5F5</color>
+    <color name="text_hint">#FF999999</color>
+</resources>

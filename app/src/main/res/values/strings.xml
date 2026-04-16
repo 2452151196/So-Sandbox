@@ -1,0 +1,26 @@
+<resources>
+    <string name="app_name">SO Sandbox</string>
+    <string name="select_so_file">选择 SO 文件</string>
+    <string name="no_so_loaded">尚未加载 SO 文件</string>
+    <string name="load_success">SO 加载成功</string>
+    <string name="load_failed">SO 加载失败</string>
+    <string name="base_address">基址: 0x%s</string>
+    <string name="function_count">发现 %d 个函数</string>
+    <string name="search_hint">搜索函数名 / 地址…</string>
+    <string name="return_type">返回值类型</string>
+    <string name="param_count">参数个数</string>
+    <string name="param_type">参数类型</string>
+    <string name="param_value">参数值</string>
+    <string name="invoke">调用</string>
+    <string name="cancel">取消</string>
+    <string name="result">结果</string>
+    <string name="error">错误</string>
+    <string name="crash_signal">函数崩溃: %s</string>
+    <string name="offset">偏移: 0x%s</string>
+    <string name="size">大小: %d</string>
+    <string name="add_param">添加参数</string>
+    <string name="invoke_function">调用函数</string>
+    <string name="function_list">函数列表</string>
+    <string name="so_info">SO 信息</string>
+    <string name="loading">加载中…</string>
+</resources>

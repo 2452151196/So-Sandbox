@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:padding="4dp"
+    android:gravity="center_vertical">
+
+    <!-- Offset -->
+    <TextView
+        android:id="@+id/tv_offset"
+        android:layout_width="70dp"
+        android:layout_height="wrap_content"
+        android:text="00000000"
+        android:textColor="@color/accent"
+        android:textSize="14sp"
+        android:fontFamily="monospace" />
+
+    <!-- Hex Bytes (8 cells) -->
+    <LinearLayout
+        android:id="@+id/hex_container"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="horizontal" />
+
+    <TextView
+        android:id="@+id/tv_ascii"
+        android:layout_width="80dp"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:text="........"
+        android:textColor="@color/text_secondary"
+        android:textSize="14sp"
+        android:fontFamily="monospace" />
+
+</LinearLayout>

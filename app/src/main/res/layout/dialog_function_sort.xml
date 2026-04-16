@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <!-- 标题区域 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="排序方式"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:textColor="@color/text_primary"
+        android:layout_marginBottom="12dp" />
+
+    <!-- 排序选项卡片 - 小尺寸 -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:cardCornerRadius="8dp"
+        app:cardElevation="0dp"
+        app:strokeWidth="0dp"
+        app:cardBackgroundColor="@color/bg_surface">
+
+        <RadioGroup
+            android:id="@+id/rg_sort_mode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <RadioButton
+                android:id="@+id/rb_sort_address"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="按地址排序"
+                android:textSize="14sp"
+                android:textColor="@color/text_primary"
+                android:paddingStart="12dp"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp"
+                android:paddingEnd="12dp"
+                android:buttonTint="@color/accent"
+                android:background="?attr/selectableItemBackground"
+                android:gravity="center_vertical" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="@color/divider"
+                android:layout_marginStart="40dp"
+                android:layout_marginEnd="12dp" />
+
+            <RadioButton
+                android:id="@+id/rb_sort_size"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="按函数长度排序"
+                android:textSize="14sp"
+                android:textColor="@color/text_primary"
+                android:paddingStart="12dp"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp"
+                android:paddingEnd="12dp"
+                android:buttonTint="@color/accent"
+                android:background="?attr/selectableItemBackground"
+                android:gravity="center_vertical" />
+        </RadioGroup>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- 倒序选项 - 与上方对齐 -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        app:cardCornerRadius="8dp"
+        app:cardElevation="0dp"
+        app:strokeWidth="0dp"
+        app:cardBackgroundColor="@color/bg_surface">
+
+        <CheckBox
+            android:id="@+id/cb_reverse_sort"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="倒序排列"
+            android:textSize="14sp"
+            android:textColor="@color/text_primary"
+            android:paddingStart="12dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp"
+            android:paddingEnd="12dp"
+            android:buttonTint="@color/accent"
+            android:background="?attr/selectableItemBackground"
+            android:gravity="center_vertical" />
+    </com.google.android.material.card.MaterialCardView>
+
+</LinearLayout>
