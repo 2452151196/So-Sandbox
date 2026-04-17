@@ -13,8 +13,10 @@ import android.view.MenuItem;
 import android.view.View;
 import android.widget.CheckBox;
 import android.widget.RadioButton;
+import android.widget.Button;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 
 import com.example.anative.R;
@@ -88,13 +90,42 @@ public class FunctionListActivity extends AppCompatActivity {
     private boolean onToolbarMenuItemClick(MenuItem item) {
         int itemId = item.getItemId();
         if (itemId == R.id.action_sort_dialog) {
-            showSortDialog();
+            showMoreActionsDialog();
             return true;
         }
         return false;
     }
 
     private void syncSortMenuState() {
+    }
+
+    private void showMoreActionsDialog() {
+        String[] actions = new String[]{"排序方式", "使用教程"};
+        new AlertDialog.Builder(this)
+                .setTitle("更多")
+                .setItems(actions, (dialog, which) -> {
+                    if (which == 0) {
+                        showSortDialog();
+                    } else if (which == 1) {
+                        showTutorialDialog();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void showTutorialDialog() {
+        String tutorial = ""
+                + "1. 点击函数行：打开函数详情（汇编/伪C/文本等）。\n\n"
+                + "2. 长按函数行：扫描并查看交叉引用（谁调用它 / 它调用谁）。\n\n"
+                + "3. 顶部搜索框：按函数名实时过滤列表。\n\n"
+                + "4. 右上角「更多」→ 排序方式：按地址/函数长度排序，并支持倒序。\n\n"
+                + "5. 在交叉引用弹窗中点击条目：可直接跳转到对应函数。";
+        new AlertDialog.Builder(this)
+                .setTitle("函数列表使用教程")
+                .setMessage(tutorial)
+                .setPositiveButton("知道了", null)
+                .show();
     }
 
     private void showSortDialog() {
@@ -110,7 +141,8 @@ public class FunctionListActivity extends AppCompatActivity {
         }
         cbReverseSort.setChecked(adapter.isReverseSort());
 
-        new AlertDialog.Builder(this, R.style.Theme_Native_Dialog_Rounded)
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("排序方式")
                 .setView(dialogView)
                 .setPositiveButton("确定", (d, which) -> {
                     int sortMode = rbSortSize.isChecked()
@@ -121,7 +153,16 @@ public class FunctionListActivity extends AppCompatActivity {
                     updateCount();
                 })
                 .setNegativeButton("取消", null)
-                .show();
+                .create();
+
+        dialog.setOnShowListener(d -> {
+            int buttonColor = ContextCompat.getColor(this, R.color.accent);
+            Button positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            Button negative = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
+            if (positive != null) positive.setTextColor(buttonColor);
+            if (negative != null) negative.setTextColor(buttonColor);
+        });
+        dialog.show();
     }
 
     private void showFunctionOptions(NativeFunction function) {
@@ -180,43 +221,8 @@ public class FunctionListActivity extends AppCompatActivity {
     private void showXRefResultDialog(NativeFunction func,
                                       List<XRefScanner.CallRef> callers,
                                       List<XRefScanner.CallRef> callees) {
-        Map<Long, NativeFunction> funcByOffset = new HashMap<>();
-        List<NativeFunction> allFuncs = DataHolder.getInstance().getFunctions();
-        if (allFuncs != null) {
-            for (NativeFunction f : allFuncs) funcByOffset.put(f.getOffset(), f);
-        }
-
-        // 合并可跳转的函数
-        java.util.LinkedHashMap<Long, String> navTargets = new java.util.LinkedHashMap<>();
-        for (XRefScanner.CallRef ref : callers) {
-            navTargets.put(ref.callerFuncOffset, "← " + ref.callerFuncName + String.format(" (0x%X)", ref.instrOffset));
-        }
-        for (XRefScanner.CallRef ref : callees) {
-            navTargets.put(ref.callerFuncOffset, "→ " + ref.callerFuncName + String.format(" (0x%X)", ref.instrOffset));
-        }
-
-        String title = String.format("交叉引用: %s\n被%d个函数调用 | 调用%d个函数",
-                func.getDemangledName(), callers.size(), callees.size());
-
-        if (navTargets.isEmpty()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("交叉引用: " + func.getDemangledName())
-                    .setMessage("未找到交叉引用")
-                    .setPositiveButton("确定", null)
-                    .show();
-        } else {
-            String[] items = navTargets.values().toArray(new String[0]);
-            Long[] offsets = navTargets.keySet().toArray(new Long[0]);
-
-            new AlertDialog.Builder(this)
-                    .setTitle(title)
-                    .setItems(items, (dialog, which) -> {
-                        NativeFunction target = funcByOffset.get(offsets[which]);
-                        if (target != null) showFunctionOptions(target);
-                    })
-                    .setPositiveButton("关闭", null)
-                    .show();
-        }
+        XRefDialog dialog = XRefDialog.newScannerInstance(func, callers, callees, baseAddress);
+        dialog.show(getSupportFragmentManager(), "xrefs");
     }
 
     @Override

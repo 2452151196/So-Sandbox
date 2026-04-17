@@ -8,6 +8,7 @@ import android.os.Looper;
 import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
+import android.util.TypedValue;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -91,6 +92,7 @@ public class TextFragment extends Fragment {
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         buildSectionButtons();
+        tvCode.setTextSize(TypedValue.COMPLEX_UNIT_SP, SettingsActivity.getCodeFontSizeSp(requireContext()));
         tvCode.setText("点击上方按钮选择要查看的段");
     }
 

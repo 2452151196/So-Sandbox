@@ -4,8 +4,8 @@
 
     <item
         android:id="@+id/action_run"
-        android:title="执行"
-        android:icon="@android:drawable/ic_media_play"
+        android:title="保存SO"
+        android:icon="@drawable/file"
         app:showAsAction="always" />
 
 </menu>

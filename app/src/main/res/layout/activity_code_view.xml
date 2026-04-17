@@ -64,6 +64,19 @@
             app:cornerRadius="18dp"
             style="@style/Widget.MaterialComponents.Button" />
 
+        <!-- 保存按钮 -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_save"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_marginStart="8dp"
+            android:text="保存SO"
+            android:textSize="12sp"
+            android:textColor="@color/white"
+            app:backgroundTint="@color/orange_accent"
+            app:cornerRadius="18dp"
+            style="@style/Widget.MaterialComponents.Button" />
+
     </LinearLayout>
 
     <!-- 信息栏 -->

@@ -32,6 +32,8 @@ import java.util.concurrent.Executors;
 
 public class RegisterNativesActivity extends AppCompatActivity {
 
+    public static final String EXTRA_STATIC_MODE = "static_mode";
+
     private TextView tvStatus;
     private ProgressBar progressBar;
     private RecyclerView recyclerView;
@@ -39,16 +41,19 @@ public class RegisterNativesActivity extends AppCompatActivity {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean staticMode = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_register_natives);
 
+        staticMode = getIntent().getBooleanExtra(EXTRA_STATIC_MODE, false);
+
         androidx.appcompat.widget.Toolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
         if (getSupportActionBar() != null) {
-            getSupportActionBar().setTitle("RegisterNatives 代理");
+            getSupportActionBar().setTitle(staticMode ? "JNI 注册表 (静态)" : "RegisterNatives 代理");
             getSupportActionBar().setDisplayHomeAsUpEnabled(true);
         }
         toolbar.setNavigationOnClickListener(v -> finish());
@@ -63,7 +68,19 @@ public class RegisterNativesActivity extends AppCompatActivity {
         recyclerView.setLayoutManager(new LinearLayoutManager(this));
         recyclerView.setAdapter(adapter);
 
-        runProxy();
+        staticMode = getIntent().getBooleanExtra(EXTRA_STATIC_MODE, false);
+        if (staticMode) {
+            runStaticOnly();
+        } else {
+            runProxy();
+        }
+    }
+
+    private void runStaticOnly() {
+        progressBar.setVisibility(View.GONE);
+        ParseSummary summary = parseAndDisplay(null);
+        tvStatus.setText("静态分析模式：静态注册 " + summary.staticCount + " 个函数");
+        tvStatus.setTextColor(getResColor(R.color.text_secondary));
     }
 
     private void runProxy() {
@@ -116,9 +133,9 @@ public class RegisterNativesActivity extends AppCompatActivity {
 
         if (result.startsWith("ERR:")) {
             String msg = result.substring(4);
-            tvStatus.setText("❌ " + msg);
+            ParseSummary summary = parseAndDisplay(null); // 仍显示静态注册函数
+            tvStatus.setText("❌ " + msg + "（动态注册 " + summary.dynamicCount + " 个，静态注册 " + summary.staticCount + " 个）");
             tvStatus.setTextColor(getResColor(R.color.red_error));
-            parseAndDisplay(null); // 仍显示静态注册函数
             return;
         }
 
@@ -126,9 +143,9 @@ public class RegisterNativesActivity extends AppCompatActivity {
             String[] parts = result.substring(6).split("\\|");
             String signal = parts.length > 0 ? parts[0] : "unknown";
             int count = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
-            tvStatus.setText("⚠ JNI_OnLoad 崩溃 (信号: " + signal + ")，崩溃前已捕获 " + count + " 个动态注册");
+            ParseSummary summary = parseAndDisplay(captured);
+            tvStatus.setText("⚠ JNI_OnLoad 崩溃 (信号: " + signal + ")，动态注册 " + summary.dynamicCount + " 个，静态注册 " + summary.staticCount + " 个");
             tvStatus.setTextColor(getResColor(R.color.orange_accent));
-            parseAndDisplay(captured);
             return;
         }
 
@@ -146,15 +163,16 @@ public class RegisterNativesActivity extends AppCompatActivity {
                 default: versionStr = "0x" + Integer.toHexString(version); break;
             }
 
-            tvStatus.setText("✓ JNI_OnLoad 成功 (版本: " + versionStr + ")，捕获 " + count + " 个动态注册");
+            ParseSummary summary = parseAndDisplay(captured);
+            tvStatus.setText("✓ JNI_OnLoad 成功 (版本: " + versionStr + ")，动态注册 " + summary.dynamicCount + " 个，静态注册 " + summary.staticCount + " 个");
             tvStatus.setTextColor(getResColor(R.color.green_success));
-            parseAndDisplay(captured);
         }
     }
 
-    private void parseAndDisplay(String captured) {
+    private ParseSummary parseAndDisplay(String captured) {
         List<RegNativeItem> items = new ArrayList<>();
         long baseAddress = DataHolder.getInstance().getBaseAddress();
+        int dynamicCount = 0;
 
         // 1. 解析动态注册的函数
         if (captured != null && !captured.isEmpty()) {
@@ -177,20 +195,35 @@ public class RegisterNativesActivity extends AppCompatActivity {
                     }
                     item.offset = baseAddress > 0 ? item.address - baseAddress : 0;
                     items.add(item);
+                    dynamicCount++;
                 }
             }
         }
 
         // 2. 追加静态注册的 JNI 函数 (Java_ 前缀)
-        items.addAll(loadStaticJniFunctions(baseAddress));
+        List<RegNativeItem> staticItems = loadStaticJniFunctions(baseAddress);
+        items.addAll(staticItems);
 
         adapter.setItems(items);
+        return new ParseSummary(dynamicCount, staticItems.size());
+    }
+
+    static class ParseSummary {
+        final int dynamicCount;
+        final int staticCount;
+
+        ParseSummary(int dynamicCount, int staticCount) {
+            this.dynamicCount = dynamicCount;
+            this.staticCount = staticCount;
+        }
     }
 
     private List<RegNativeItem> loadStaticJniFunctions(long baseAddress) {
         List<RegNativeItem> items = new ArrayList<>();
         List<NativeFunction> functions = DataHolder.getInstance().getFunctions();
         if (functions == null) return items;
+
+        android.util.Log.d("LoadStatic", "Total functions: " + functions.size() + ", baseAddress=0x" + Long.toHexString(baseAddress));
 
         for (NativeFunction f : functions) {
             if (f.getName() != null && f.getName().startsWith("Java_")) {
@@ -222,8 +255,12 @@ public class RegisterNativesActivity extends AppCompatActivity {
                 item.address = baseAddress > 0 ? baseAddress + f.getOffset() : f.getOffset();
                 item.funcSize = f.getSize();
                 items.add(item);
+
+                android.util.Log.d("LoadStatic", "Added: " + item.methodName + " @ 0x" + Long.toHexString(item.address) + " (offset=0x" + Long.toHexString(item.offset) + ")");
             }
         }
+
+        android.util.Log.d("LoadStatic", "Total static JNI items: " + items.size());
         return items;
     }
 
@@ -242,6 +279,8 @@ public class RegisterNativesActivity extends AppCompatActivity {
             funcSize = 256; // 动态注册不知道大小，默认 256
             funcName = item.className + "." + item.methodName;
         }
+
+        android.util.Log.d("JumpDebug", "Jumping to: " + funcName + " @ 0x" + Long.toHexString(absAddr) + " (base=0x" + Long.toHexString(baseAddress) + ", isStatic=" + item.isStatic + ", offset=0x" + Long.toHexString(item.offset) + ")");
 
         Intent intent = new Intent(this, FunctionDetailActivity.class);
         intent.putExtra(FunctionDetailActivity.EXTRA_FUNC_NAME, funcName);
@@ -324,10 +363,10 @@ public class RegisterNativesActivity extends AppCompatActivity {
             typeBg.setShape(GradientDrawable.RECTANGLE);
             typeBg.setCornerRadius(8f);
             if (item.isStatic) {
-                h.tvType.setText("静态");
+                h.tvType.setText("静态注册");
                 typeBg.setColor(0xFF607D8B); // 灰蓝
             } else {
-                h.tvType.setText("动态");
+                h.tvType.setText("动态注册");
                 typeBg.setColor(0xFF4CAF50); // 绿
             }
             h.tvType.setBackground(typeBg);

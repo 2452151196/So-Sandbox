@@ -213,6 +213,37 @@ public class NativeInvoker {
     public static native boolean writeMemory(long addr, byte value);
 
     /**
+     * 写入多字节到内存 (用于写入完整指令)
+     * @param addr 内存地址
+     * @param bytes 要写入的字节数组
+     * @return 是否成功
+     */
+    public static native boolean writeMemoryBytes(long addr, byte[] bytes);
+
+    /**
+     * 汇编写入: 将ARM64汇编码转换为机器码
+     * @param assembly 汇编指令，如 "MOV X0, X1"
+     * @param virtualOffset 指令的虚拟偏移地址
+     * @return 机器码字节数组，或null表示失败
+     */
+    public static native byte[] assembleInstruction(String assembly, long virtualOffset);
+
+    /**
+     * 获取上一次 assembleInstruction 失败的错误信息
+     * @return 错误描述字符串，没有错误时返回空字符串
+     */
+    public static native String getLastAssembleError();
+
+    /**
+     * 解析单条指令为机器码并写入SO文件
+     * @param soPath SO文件路径
+     * @param virtualOffset 虚拟偏移地址
+     * @param assembly 汇编指令
+     * @return 写入的字节数，-1表示失败
+     */
+    public static native int patchInstruction(String soPath, long virtualOffset, String assembly);
+
+    /**
      * 启用运行时追踪 - 在函数执行时记录其内部调用
      * @param funcAddr 函数绝对地址
      * @param funcName 函数名称（用于日志显示）

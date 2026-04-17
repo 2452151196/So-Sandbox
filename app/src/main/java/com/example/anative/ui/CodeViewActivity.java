@@ -1,15 +1,23 @@
 package com.example.anative.ui;
 
+import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
+import android.util.TypedValue;
 import android.view.View;
 import android.widget.ImageButton;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -22,6 +30,9 @@ import com.example.anative.core.NativeFunction;
 import com.example.anative.core.NativeInvoker;
 import com.example.anative.core.PltEntry;
 
+import java.io.File;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -34,12 +45,12 @@ public class CodeViewActivity extends AppCompatActivity {
     public static final String EXTRA_FUNC_NAME = "func_name";
     public static final String EXTRA_FUNC_ADDR = "func_addr";
     public static final String EXTRA_FUNC_SIZE = "func_size";
-    public static final String EXTRA_MODE = "mode"; // "asm" or "pseudoc" 
+    public static final String EXTRA_MODE = "mode"; // "asm" or "pseudoc"
     public static final String EXTRA_DEMANGLED_NAME = "demangled_name";
     public static final String EXTRA_SIGNATURE = "signature";
 
     private TextView tvTitle, tvSubtitle, tvInfo, tvCode;
-    private MaterialButton btnToggle;
+    private MaterialButton btnToggle, btnSave;
     private ProgressBar progressBar;
 
     private long funcAddr;      // 运行时绝对地址
@@ -68,7 +79,9 @@ public class CodeViewActivity extends AppCompatActivity {
         tvSubtitle = findViewById(R.id.tv_subtitle);
         tvInfo = findViewById(R.id.tv_info);
         tvCode = findViewById(R.id.tv_code);
+        tvCode.setTextSize(TypedValue.COMPLEX_UNIT_SP, SettingsActivity.getCodeFontSizeSp(this));
         btnToggle = findViewById(R.id.btn_toggle);
+        btnSave = findViewById(R.id.btn_save);
         progressBar = findViewById(R.id.progress_bar);
 
         ImageButton btnBack = findViewById(R.id.btn_back);
@@ -79,11 +92,9 @@ public class CodeViewActivity extends AppCompatActivity {
         funcSize = getIntent().getLongExtra(EXTRA_FUNC_SIZE, 0);
         demangledName = getIntent().getStringExtra(EXTRA_DEMANGLED_NAME);
         signature = getIntent().getStringExtra(EXTRA_SIGNATURE);
-        // 获取基址、字符串表和PLT表
         baseAddress = DataHolder.getInstance().getBaseAddress();
         stringsList = DataHolder.getInstance().getStrings();
         pltList = DataHolder.getInstance().getPltEntries();
-        // 计算偏移 (显示用)
         funcOffset = funcAddr - baseAddress;
         isAsmMode = "asm".equals(getIntent().getStringExtra(EXTRA_MODE));
 
@@ -95,6 +106,8 @@ public class CodeViewActivity extends AppCompatActivity {
             isAsmMode = !isAsmMode;
             updateView();
         });
+
+        btnSave.setOnClickListener(v -> saveModifiedSo());
 
         updateView();
     }
@@ -181,14 +194,12 @@ public class CodeViewActivity extends AppCompatActivity {
         int gray = 0xFF888888;
         int orange = 0xFFFF9800;
 
-        // 高亮地址 (0x开头)
         Pattern addrPattern = Pattern.compile("^0x[0-9a-fA-F]+:", Pattern.MULTILINE);
         Matcher m = addrPattern.matcher(code);
         while (m.find()) {
             ss.setSpan(new ForegroundColorSpan(gray), m.start(), m.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
 
-        // 高亮指令助记符
         String[] branchMnemonics = {"bl", "blr", "br", "b", "ret", "b\\.\\w+"};
         for (String mne : branchMnemonics) {
             Pattern p = Pattern.compile("\\s(" + mne + ")\\s", Pattern.MULTILINE);
@@ -198,14 +209,12 @@ public class CodeViewActivity extends AppCompatActivity {
             }
         }
 
-        // 高亮注释
         Pattern commentPattern = Pattern.compile(";.*$", Pattern.MULTILINE);
         m = commentPattern.matcher(code);
         while (m.find()) {
             ss.setSpan(new ForegroundColorSpan(green), m.start(), m.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
 
-        // 高亮立即数
         Pattern immPattern = Pattern.compile("#0x[0-9a-fA-F]+|#\\d+");
         m = immPattern.matcher(code);
         while (m.find()) {
@@ -266,7 +275,6 @@ public class CodeViewActivity extends AppCompatActivity {
         return sb.toString();
     }
 
-    // 构建字符串表格式: "addr|str|addr|str|..."
     private String buildStringTable(List<ElfParser.StringEntry> strings) {
         if (strings == null || strings.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
@@ -277,7 +285,6 @@ public class CodeViewActivity extends AppCompatActivity {
         return sb.toString();
     }
 
-    // 构建PLT表格式: "offset|name|offset|name|..."
     private String buildPltTable(List<PltEntry> pltEntries) {
         if (pltEntries == null || pltEntries.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
@@ -296,7 +303,6 @@ public class CodeViewActivity extends AppCompatActivity {
         int purple = 0xFFCE93D8;
         int yellow = 0xFFFFEB3B;
 
-        // 高亮关键字
         String[] keywords = {"if", "goto", "return", "long", "int", "void", "unsigned", "int64_t", "int32_t", "int8_t", "int16_t", "uint8_t", "uint16_t", "byte", "short", "float", "double", "char", "JNIEnv", "jobject", "jclass", "JavaVM"};
         for (String kw : keywords) {
             Pattern p = Pattern.compile("\\b" + kw + "\\b");
@@ -306,28 +312,24 @@ public class CodeViewActivity extends AppCompatActivity {
             }
         }
 
-        // 高亮注释
         Pattern commentPattern = Pattern.compile("//.*$", Pattern.MULTILINE);
         Matcher m = commentPattern.matcher(code);
         while (m.find()) {
             ss.setSpan(new ForegroundColorSpan(green), m.start(), m.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
 
-        // 高亮函数调用
         Pattern callPattern = Pattern.compile("call_0x[0-9a-fA-F]+");
         m = callPattern.matcher(code);
         while (m.find()) {
             ss.setSpan(new ForegroundColorSpan(cyan), m.start(), m.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
 
-        // 高亮标签
         Pattern labelPattern = Pattern.compile("^loc_[0-9a-fA-F]+:", Pattern.MULTILINE);
         m = labelPattern.matcher(code);
         while (m.find()) {
             ss.setSpan(new ForegroundColorSpan(purple), m.start(), m.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
 
-        // 高亮数字
         Pattern numPattern = Pattern.compile("\\b0x[0-9a-fA-F]+\\b");
         m = numPattern.matcher(code);
         while (m.find()) {
@@ -335,6 +337,80 @@ public class CodeViewActivity extends AppCompatActivity {
         }
 
         return ss;
+    }
+
+    private void saveModifiedSo() {
+        String originalUriStr = DataHolder.getInstance().getOriginalUri();
+        String soPath = DataHolder.getInstance().getSoPath();
+
+        if (originalUriStr == null && soPath == null) {
+            Toast.makeText(this, "SO文件路径未知", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String newFileName;
+        if (soPath != null) {
+            newFileName = new File(soPath).getName().replace(".so", "_patched.so");
+        } else {
+            newFileName = "export_patched.so";
+        }
+
+        Toast.makeText(this, "正在保存...", Toast.LENGTH_SHORT).show();
+        executor.execute(() -> {
+            try {
+                Uri originalUri = Uri.parse(originalUriStr);
+                String destDir = getExternalFilesDir(null).getAbsolutePath();
+                File destFile = new File(destDir, newFileName);
+
+                InputStream is = getContentResolver().openInputStream(originalUri);
+                if (is == null) throw new Exception("无法打开原始文件");
+                OutputStream os = new java.io.FileOutputStream(destFile);
+                byte[] buffer = new byte[8192];
+                int len;
+                while ((len = is.read(buffer)) != -1) {
+                    os.write(buffer, 0, len);
+                }
+                is.close();
+                os.close();
+
+                final File savedFile = destFile;
+                handler.post(() -> showSaveSuccessDialog(savedFile));
+            } catch (Exception e) {
+                handler.post(() -> Toast.makeText(this,
+                        "保存失败: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void showSaveSuccessDialog(File savedFile) {
+        String path = savedFile.getAbsolutePath();
+        new AlertDialog.Builder(this)
+                .setTitle("保存成功")
+                .setMessage(path)
+                .setPositiveButton("复制路径", (dialog, which) -> {
+                    ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(ClipData.newPlainText("SO路径", path));
+                    Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
+                })
+                .setNeutralButton("打开目录", (dialog, which) -> {
+                    try {
+                        Intent openDir = new Intent(Intent.ACTION_VIEW);
+                        Uri dirUri = Uri.parse("file://" + savedFile.getParent());
+                        openDir.setDataAndType(dirUri, "resource/folder");
+                        startActivity(openDir);
+                    } catch (Exception e) {
+                        try {
+                            Intent intent = Intent.createChooser(
+                                    new Intent(Intent.ACTION_VIEW).setDataAndType(
+                                            Uri.parse("file://" + savedFile.getParent()), "*/*"), "打开目录");
+                            startActivity(intent);
+                        } catch (Exception e2) {
+                            Toast.makeText(this, "无法打开目录", Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                })
+                .setNegativeButton("关闭", null)
+                .show();
     }
 
     @Override

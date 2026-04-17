@@ -7,6 +7,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputFilter;
 import android.text.InputType;
+import android.util.TypedValue;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -25,6 +26,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.example.anative.R;
 import com.example.anative.core.DataHolder;
+import com.example.anative.core.ElfParser;
 import com.example.anative.core.NativeInvoker;
 
 import java.io.File;
@@ -40,21 +42,29 @@ public class HexFragment extends Fragment {
 
     private long funcAddr;
     private long funcSize;
+    private long baseAddress;
     private byte[] data;
+    private byte[] originalBytes; // 保存原始字节，用于比较修改
     private boolean[] modified;
 
     private RecyclerView rvHex;
     private ProgressBar progressBar;
     private LinearLayout editPanel;
     private TextView tvEditInfo;
-    private View btnSave;
 
     private HexAdapter adapter;
     private int selectedRow = -1;
     private int selectedCol = -1;
+    private float codeFontSizeSp = 13f;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler handler = new Handler(Looper.getMainLooper());
+
+    // 用于外部通知刷新的接口
+    public interface OnRefreshListener {
+        void onRefresh();
+    }
+    private OnRefreshListener refreshListener;
 
     public static HexFragment newInstance(long funcAddr, long funcSize) {
         HexFragment fragment = new HexFragment();
@@ -72,6 +82,7 @@ public class HexFragment extends Fragment {
             funcAddr = getArguments().getLong(ARG_FUNC_ADDR);
             funcSize = getArguments().getLong(ARG_FUNC_SIZE);
         }
+        baseAddress = DataHolder.getInstance().getBaseAddress();
     }
 
     @Nullable
@@ -83,17 +94,23 @@ public class HexFragment extends Fragment {
         progressBar = view.findViewById(R.id.progressBar);
         editPanel = view.findViewById(R.id.edit_panel);
         tvEditInfo = view.findViewById(R.id.tv_edit_info);
-        btnSave = view.findViewById(R.id.btn_save);
         return view;
     }
 
     @Override
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
+        codeFontSizeSp = SettingsActivity.getCodeFontSizeSp(requireContext());
         setupRecyclerView();
         loadHexData();
+    }
 
-        btnSave.setOnClickListener(v -> saveChanges());
+    public void refreshFromDataHolder() {
+        loadHexData();
+    }
+
+    public void setOnRefreshListener(OnRefreshListener listener) {
+        this.refreshListener = listener;
     }
 
     private void setupRecyclerView() {
@@ -108,22 +125,25 @@ public class HexFragment extends Fragment {
         executor.execute(() -> {
             int size = (int) Math.min(funcSize, 8192); // 最大 8KB
             data = new byte[size];
+            originalBytes = new byte[size]; // 保存原始字节
             modified = new boolean[size];
             boolean readOk = false;
 
-            // 通过 JNI 读取内存
-            try {
-                byte[] read = NativeInvoker.readMemory(funcAddr, size);
-                if (read != null && read.length > 0) {
-                    System.arraycopy(read, 0, data, 0, Math.min(read.length, size));
-                    readOk = true;
-                }
-            } catch (Exception e) {
-                // 读取失败
-            }
-
+            // 优先从当前SO文件读取，确保显示真实已写入结果
+            readOk = loadFromSoFile(data, size);
             if (!readOk) {
-                readOk = loadFromSoFile(data, size);
+                try {
+                    byte[] read = NativeInvoker.readMemory(funcAddr, size);
+                    if (read != null && read.length > 0) {
+                        System.arraycopy(read, 0, data, 0, Math.min(read.length, size));
+                        readOk = true;
+                    }
+                } catch (Exception e) {
+                    // ignore
+                }
+            }
+            if (readOk) {
+                System.arraycopy(data, 0, originalBytes, 0, size);
             }
 
             int rowCount = (size + BYTES_PER_ROW - 1) / BYTES_PER_ROW;
@@ -172,7 +192,7 @@ public class HexFragment extends Fragment {
     private void showEditDialog(long addr, int row, int col, byte currentValue) {
         EditText input = new EditText(getContext());
         input.setInputType(InputType.TYPE_CLASS_TEXT);
-        input.setFilters(new InputFilter[]{new InputFilter.LengthFilter(2)});
+        input.setFilters(new InputFilter[]{new InputFilter.AllCaps(), new InputFilter.LengthFilter(2)});
         input.setText(String.format("%02X", currentValue & 0xFF));
         input.selectAll();
 
@@ -186,10 +206,22 @@ public class HexFragment extends Fragment {
                         if (newVal >= 0 && newVal <= 255) {
                             int index = row * BYTES_PER_ROW + col;
                             if (index < data.length) {
-                                data[index] = (byte) newVal;
-                                modified[index] = true;
-                                adapter.notifyItemChanged(row);
-                                tvEditInfo.setText(String.format("已修改: 0x%X = %02X", addr, newVal));
+                                final byte oldVal = data[index];
+                                final byte newByte = (byte) newVal;
+                                executor.execute(() -> {
+                                    try {
+                                        writeByteToCurrentSo(addr, newByte);
+                                        handler.post(() -> {
+                                            data[index] = newByte;
+                                            modified[index] = (newByte != oldVal);
+                                            adapter.notifyItemChanged(row);
+                                            tvEditInfo.setText(String.format("已写入: 0x%X = %02X", addr, newVal));
+                                            if (refreshListener != null) refreshListener.onRefresh();
+                                        });
+                                    } catch (Exception ex) {
+                                        handler.post(() -> Toast.makeText(getContext(), "写入失败: " + ex.getMessage(), Toast.LENGTH_SHORT).show());
+                                    }
+                                });
                             }
                         }
                     } catch (NumberFormatException e) {
@@ -200,85 +232,56 @@ public class HexFragment extends Fragment {
                 .show();
     }
 
-    private void saveChanges() {
-        int changeCount = 0;
-        for (boolean m : modified) if (m) changeCount++;
+    private void writeByteToCurrentSo(long addr, byte value) throws Exception {
+        String soPath = DataHolder.getInstance().getSoPath();
+        if (soPath == null || soPath.isEmpty()) throw new Exception("SO文件路径未知");
 
-        if (changeCount == 0) {
-            Toast.makeText(getContext(), "没有修改需要保存", Toast.LENGTH_SHORT).show();
-            return;
+        long virtualAddr = (baseAddress > 0 && addr >= baseAddress) ? (addr - baseAddress) : addr;
+        long fileOffset = ElfParser.virtualAddrToFileOffset(soPath, virtualAddr);
+
+        try (RandomAccessFile raf = new RandomAccessFile(soPath, "rw")) {
+            raf.seek(fileOffset);
+            raf.write(value & 0xFF);
         }
-
-        final int totalChanges = changeCount;
-        // 应用修改到内存
-        executor.execute(() -> {
-            boolean success = true;
-            String exportPath = null;
-            for (int i = 0; i < modified.length; i++) {
-                if (modified[i]) {
-                    try {
-                        NativeInvoker.writeMemory(funcAddr + i, data[i]);
-                        modified[i] = false; // 清除标记
-                    } catch (Exception e) {
-                        success = false;
-                    }
-                }
-            }
-
-            if (success) {
-                exportPath = exportPatchedSo();
-            }
-
-            final boolean finalSuccess = success;
-            final String finalExportPath = exportPath;
-            handler.post(() -> {
-                Toast.makeText(getContext(),
-                        finalSuccess ? "已保存 " + totalChanges + " 处修改" : "部分修改保存失败",
-                        Toast.LENGTH_SHORT).show();
-                if (finalSuccess && finalExportPath != null) {
-                    Toast.makeText(getContext(), "已导出: " + finalExportPath, Toast.LENGTH_LONG).show();
-                }
-                adapter.notifyDataSetChanged();
-            });
-        });
     }
 
-    private String exportPatchedSo() {
-        String soPath = DataHolder.getInstance().getSoPath();
-        if (soPath == null || soPath.isEmpty()) return null;
-
-        long base = DataHolder.getInstance().getBaseAddress();
-        if (base <= 0) return null;
-
-        File src = new File(soPath);
-        File outDir = new File(src.getParentFile(), "patched");
-        if (!outDir.exists() && !outDir.mkdirs()) return null;
-
-        File out = new File(outDir, src.getName().replace(".so", "_patched.so"));
-
-        try (RandomAccessFile inRaf = new RandomAccessFile(src, "r");
-             RandomAccessFile outRaf = new RandomAccessFile(out, "rw")) {
-
-            byte[] all = new byte[(int) inRaf.length()];
-            inRaf.readFully(all);
-
-            for (int i = 0; i < data.length; i++) {
-                long abs = funcAddr + i;
-                long fileOffset = abs - base;
-                if (fileOffset >= 0 && fileOffset < all.length) {
-                    all[(int) fileOffset] = data[i];
-                }
-            }
-
-            outRaf.setLength(0);
-            outRaf.write(all);
-            return out.getAbsolutePath();
-        } catch (Exception e) {
-            return null;
+    /**
+     * 获取所有修改的字节映射 (文件偏移 -> 新字节值)
+     */
+    public java.util.Map<Long, Byte> getModifications() {
+        java.util.Map<Long, Byte> mods = new java.util.HashMap<>();
+        if (data == null || modified == null || data.length == 0) {
+            android.util.Log.d("HexFragment", "getModifications: data or modified is null/empty");
+            return mods;
         }
+        String soPath = DataHolder.getInstance().getSoPath();
+        long base = DataHolder.getInstance().getBaseAddress();
+        int modCount = 0;
+        for (int i = 0; i < modified.length; i++) {
+            if (modified[i]) {
+                long addr = funcAddr + i;  // 这是绝对地址
+                long fileOffset;
+                if (base > 0 && addr >= base) {
+                    // 动态模式：虚拟地址转文件偏移
+                    fileOffset = addr - base;
+                } else {
+                    // 静态模式：直接使用（已经是文件偏移）
+                    fileOffset = addr;
+                }
+                mods.put(fileOffset, data[i]);
+                modCount++;
+            }
+        }
+        android.util.Log.d("HexFragment", "getModifications: found " + modCount + " modifications");
+        return mods;
     }
 
     // ========== Adapter ==========
+
+    // 暴露数据给外部保存使用
+    byte[] getData() { return data; }
+    boolean[] getModified() { return modified; }
+    long getFuncAddr() { return funcAddr; }
 
     class HexAdapter extends RecyclerView.Adapter<HexAdapter.VH> {
         private byte[] data;
@@ -315,7 +318,7 @@ public class HexFragment extends Fragment {
                 int index = pos * BYTES_PER_ROW + i;
 
                 TextView tv = new TextView(getContext());
-                tv.setTextSize(14f);
+                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, codeFontSizeSp);
                 tv.setTypeface(android.graphics.Typeface.MONOSPACE);
                 tv.setPadding(0, 6, 0, 6);
                 tv.setGravity(android.view.Gravity.CENTER);

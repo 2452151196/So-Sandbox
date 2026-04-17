@@ -7,9 +7,18 @@
 #include <dlfcn.h>
 #include <android/log.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 
 #include <capstone/capstone.h>
 #include "decompiler.h"
+
+// Keystone 架构/模式常量 (与 keystone.h 兼容)
+#define KS_ARCH_ARM64 1
+#define KS_MODE_ARM 1
+#define KS_MODE_LITTLE_ENDIAN 0
 
 #define TAG "NativeInvoker"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -997,8 +1006,8 @@ Java_com_example_anative_core_NativeInvoker_disassembleFunctionEx(
         const char *plt_comment = NULL;
         const char *synthetic_comment = NULL;
 
-        // BL指令: 查找PLT表
-        if (arm64 && strcmp(ins->mnemonic, "bl") == 0) {
+        // B/BL 指令: 查找PLT表
+        if (arm64 && (strcmp(ins->mnemonic, "bl") == 0 || strcmp(ins->mnemonic, "b") == 0)) {
             uint64_t target = 0;
             for (int j = 0; j < arm64->op_count; j++) {
                 cs_arm64_op *op = &arm64->operands[j];
@@ -1255,7 +1264,7 @@ Java_com_example_anative_core_NativeInvoker_disassembleBytes(
         const char *str_comment = NULL;
         const char *plt_comment = NULL;
 
-        if (arm64 && strcmp(ins->mnemonic, "bl") == 0) {
+        if (arm64 && (strcmp(ins->mnemonic, "bl") == 0 || strcmp(ins->mnemonic, "b") == 0)) {
             uint64_t target = 0;
             for (int j = 0; j < arm64->op_count; j++) {
                 if (arm64->operands[j].type == ARM64_OP_IMM) { target = arm64->operands[j].imm; break; }
@@ -1744,7 +1753,7 @@ Java_com_example_anative_core_NativeInvoker_disassembleTextSection(
         const char *str_comment = NULL;
         const char *plt_comment = NULL;
 
-        if (arm64 && strcmp(ins->mnemonic, "bl") == 0) {
+        if (arm64 && (strcmp(ins->mnemonic, "bl") == 0 || strcmp(ins->mnemonic, "b") == 0)) {
             uint64_t target = 0;
             for (int j = 0; j < arm64->op_count; j++) {
                 cs_arm64_op *op = &arm64->operands[j];
@@ -1916,6 +1925,8 @@ Java_com_example_anative_core_NativeInvoker_scanXRefsFromBytes(
         }
 
         // BL / B: 提取跳转目标
+        // BL 永远是函数调用；B 只有当目标落在 .text 范围内但距离当前指令较远时
+        // (可能是 tail call) 才算跨函数引用
         if (insn->id == ARM64_INS_BL || insn->id == ARM64_INS_B) {
             if (arm64) {
                 int last_imm = -1;
@@ -1924,7 +1935,18 @@ Java_com_example_anative_core_NativeInvoker_scanXRefsFromBytes(
                 }
                 if (last_imm >= 0) {
                     uint64_t target = arm64->operands[last_imm].imm;
-                    if (find_func_at(target) != NULL) {
+                    uint64_t text_end = (uint64_t)textVAddr + (uint64_t)size;
+                    int in_text = (target >= (uint64_t)textVAddr && target < text_end);
+                    int is_call = 0;
+                    if (insn->id == ARM64_INS_BL) {
+                        is_call = 1;  // BL 永远是调用
+                    } else if (in_text) {
+                        // 普通 B：远跳（跨越 4KB 以上）视为 tail call
+                        int64_t dist = (int64_t)target - (int64_t)iaddr;
+                        if (dist < 0) dist = -dist;
+                        if (dist > 0x1000) is_call = 1;
+                    }
+                    if (is_call && in_text) {
                         pos += snprintf(buffer + pos, buf_size - pos,
                                         "F|%llx|%llx\n",
                                         (unsigned long long)iaddr,
@@ -2123,8 +2145,8 @@ Java_com_example_anative_core_NativeInvoker_analyzeFunctionCalls(JNIEnv *env, jc
     int pos = 0;
     int callCount = 0;
 
-    pos += snprintf(result + pos, 65536 - pos, "# 函数调用分析\n# 基址: 0x%llX, 偏移: 0x%llX, 大小: %lld\n\n", 
-                    (unsigned long long)baseAddr, (unsigned long long)funcOffset, funcSize);
+    pos += snprintf(result + pos, 65536 - pos, "# 函数调用分析\n# 基址: 0x%llX, 偏移: 0x%llX, 大小: %ld\n\n",
+                    (unsigned long long)baseAddr, (unsigned long long)funcOffset, (long)funcSize);
 
     // 复制函数代码到缓冲区
     uint8_t* code = (uint8_t*)malloc(funcSize);
@@ -2209,4 +2231,482 @@ Java_com_example_anative_core_NativeInvoker_analyzeFunctionCalls(JNIEnv *env, jc
     jstring ret = (*env)->NewStringUTF(env, result);
     free(result);
     return ret;
+}
+
+// ============================================================================
+// 写入多字节到内存
+// ============================================================================
+
+JNIEXPORT jboolean JNICALL
+Java_com_example_anative_core_NativeInvoker_writeMemoryBytes(JNIEnv *env, jclass clazz,
+                                                             jlong addr, jbyteArray jBytes) {
+    jsize len = (*env)->GetArrayLength(env, jBytes);
+    if (len <= 0 || len > 64) {
+        LOGE("writeMemoryBytes: invalid length %d", len);
+        return JNI_FALSE;
+    }
+
+    jbyte *bytes = (*env)->GetByteArrayElements(env, jBytes, NULL);
+    if (!bytes) return JNI_FALSE;
+
+    LOGI("writeMemoryBytes: addr=0x%llx len=%d", (unsigned long long)addr, len);
+
+    // 使页面可写
+    uintptr_t page_start = (uintptr_t)addr & ~0xFFF;
+    mprotect((void*)page_start, 4096, PROT_READ | PROT_WRITE | PROT_EXEC);
+
+    int write_ok = 0;
+    crash_protection_enter();
+    if (sigsetjmp(*crash_protection_get_jmpbuf(), 1) == 0) {
+        memcpy((void*)(uintptr_t)addr, bytes, len);
+        write_ok = 1;
+    } else {
+        LOGE("writeMemoryBytes: crashed at addr 0x%llx", (unsigned long long)addr);
+    }
+    crash_protection_leave();
+
+    (*env)->ReleaseByteArrayElements(env, jBytes, bytes, JNI_ABORT);
+    return write_ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// ============================================================================
+// 汇编: 将ARM64汇编码转换为机器码
+// ============================================================================
+
+// Keystone 错误信息（最近一次）
+static char g_last_asm_error[512] = {0};
+
+JNIEXPORT jstring JNICALL
+Java_com_example_anative_core_NativeInvoker_getLastAssembleError(JNIEnv *env, jclass clazz) {
+    return (*env)->NewStringUTF(env, g_last_asm_error);
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_example_anative_core_NativeInvoker_assembleInstruction(JNIEnv *env, jclass clazz,
+                                                               jstring jAssembly, jlong virtualOffset) {
+    const char *assembly = (*env)->GetStringUTFChars(env, jAssembly, NULL);
+    if (!assembly) return NULL;
+
+    LOGI("assembleInstruction: '%s' @ offset=0x%llx", assembly, (unsigned long long)virtualOffset);
+    g_last_asm_error[0] = '\0';
+
+    // 动态加载 Keystone
+    static void *ks_handle = NULL;
+    typedef int (*ks_open_fn)(int architecture, int mode, void **engine);
+    typedef int (*ks_close_fn)(void *engine);
+    // 真实签名: int ks_asm(ks_engine*, const char*, uint64_t address,
+    //                     unsigned char **insn, size_t *insn_size, size_t *stat_count);
+    // 返回 0 成功 / -1 失败；insn 由 keystone 分配，需要 ks_free 释放
+    typedef int (*ks_asm_fn)(void *engine, const char *string, uint64_t address,
+                             unsigned char **insn, size_t *insn_size,
+                             size_t *stat_count);
+    typedef void (*ks_free_fn)(unsigned char *p);
+    typedef const char *(*ks_strerror_fn)(int code);
+    typedef int (*ks_errno_fn)(void *engine);
+
+    static ks_open_fn ks_open_fn_ptr = NULL;
+    static ks_close_fn ks_close_fn_ptr = NULL;
+    static ks_asm_fn ks_asm_fn_ptr = NULL;
+    static ks_free_fn ks_free_fn_ptr = NULL;
+    static ks_strerror_fn ks_strerror_fn_ptr = NULL;
+    static ks_errno_fn ks_errno_fn_ptr = NULL;
+    static int ks_loaded = 0;
+
+    if (!ks_loaded) {
+        ks_loaded = 1;
+        const char *ks_paths[] = {
+            "libkeystone.so",
+            "/system/lib64/libkeystone.so",
+            NULL
+        };
+        for (int i = 0; ks_paths[i]; i++) {
+            ks_handle = dlopen(ks_paths[i], RTLD_NOW);
+            if (ks_handle) {
+                LOGI("Loaded keystone from: %s", ks_paths[i]);
+                break;
+            }
+        }
+        if (ks_handle) {
+            ks_open_fn_ptr     = (ks_open_fn)     dlsym(ks_handle, "ks_open");
+            ks_close_fn_ptr    = (ks_close_fn)    dlsym(ks_handle, "ks_close");
+            ks_asm_fn_ptr      = (ks_asm_fn)      dlsym(ks_handle, "ks_asm");
+            ks_free_fn_ptr     = (ks_free_fn)     dlsym(ks_handle, "ks_free");
+            ks_strerror_fn_ptr = (ks_strerror_fn) dlsym(ks_handle, "ks_strerror");
+            ks_errno_fn_ptr    = (ks_errno_fn)    dlsym(ks_handle, "ks_errno");
+            if (!ks_open_fn_ptr || !ks_asm_fn_ptr) {
+                LOGE("keystone missing symbols");
+                dlclose(ks_handle);
+                ks_handle = NULL;
+            }
+        } else {
+            LOGE("keystone not available: %s", dlerror());
+        }
+    }
+
+    jbyteArray result = NULL;
+
+    if (!ks_handle || !ks_open_fn_ptr || !ks_asm_fn_ptr) {
+        snprintf(g_last_asm_error, sizeof(g_last_asm_error),
+                 "libkeystone.so 未加载，无法汇编");
+        (*env)->ReleaseStringUTFChars(env, jAssembly, assembly);
+        return NULL;
+    }
+
+    // Keystone 的 arch/mode 常量（与 Capstone 不同！）
+    // KS_ARCH_ARM64 = 2, KS_MODE_LITTLE_ENDIAN = 0
+    #define KS_ARCH_ARM64_VAL 2
+    #define KS_MODE_LITTLE_ENDIAN_VAL 0
+
+    void *ks = NULL;
+    int open_rc = ks_open_fn_ptr(KS_ARCH_ARM64_VAL, KS_MODE_LITTLE_ENDIAN_VAL, &ks);
+    if (open_rc != 0 || !ks) {
+        const char *errstr = (ks_strerror_fn_ptr) ? ks_strerror_fn_ptr(open_rc) : "?";
+        snprintf(g_last_asm_error, sizeof(g_last_asm_error),
+                 "ks_open 失败: %s (rc=%d)", errstr ? errstr : "?", open_rc);
+        LOGE("ks_open failed: rc=%d err=%s", open_rc, errstr ? errstr : "?");
+        (*env)->ReleaseStringUTFChars(env, jAssembly, assembly);
+        return NULL;
+    }
+
+    unsigned char *insn = NULL;
+    size_t insn_size = 0;
+    size_t stat_count = 0;
+    int asm_rc = ks_asm_fn_ptr(ks, assembly, (uint64_t)virtualOffset,
+                               &insn, &insn_size, &stat_count);
+
+    if (asm_rc == 0 && insn && insn_size > 0) {
+        result = (*env)->NewByteArray(env, (jsize)insn_size);
+        if (result) {
+            (*env)->SetByteArrayRegion(env, result, 0, (jsize)insn_size, (jbyte*)insn);
+        }
+        LOGI("assembleInstruction: ok, %zu bytes", insn_size);
+    } else {
+        int err = ks_errno_fn_ptr ? ks_errno_fn_ptr(ks) : 0;
+        const char *errstr = (ks_strerror_fn_ptr && err) ? ks_strerror_fn_ptr(err) : "unknown";
+        snprintf(g_last_asm_error, sizeof(g_last_asm_error),
+                 "汇编失败: %s (err=%d)", errstr ? errstr : "?", err);
+        LOGE("assembleInstruction: %s for '%s'", g_last_asm_error, assembly);
+    }
+
+    if (insn && ks_free_fn_ptr) ks_free_fn_ptr(insn);
+    if (ks_close_fn_ptr && ks) ks_close_fn_ptr(ks);
+
+    (*env)->ReleaseStringUTFChars(env, jAssembly, assembly);
+    return result;
+}
+
+// ============================================================================
+// 旧代码（已由 Keystone 替代），以下保留但不再被调用
+// ============================================================================
+#if 0
+JNIEXPORT jbyteArray JNICALL
+Java_com_example_anative_core_NativeInvoker_assembleInstruction_OLD(JNIEnv *env, jclass clazz,
+                                                               jstring jAssembly, jlong virtualOffset) {
+    const char *assembly = (*env)->GetStringUTFChars(env, jAssembly, NULL);
+    if (!assembly) return NULL;
+
+    jbyteArray result = NULL;
+
+    if (ks_handle && ks_open_fn_ptr && ks_asm_fn_ptr) {
+        void *ks = NULL;
+        if (ks_open_fn_ptr(CS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN, &ks) == 0) {
+            unsigned char encoding[64];
+            unsigned long long addr = (unsigned long long)virtualOffset;
+            size_t stat_count = 0;
+            size_t count = ks_asm_fn_ptr(ks, assembly, strlen(assembly), &addr, encoding, sizeof(encoding), &stat_count);
+
+            if (count > 0) {
+                result = (*env)->NewByteArray(env, (jsize)count);
+                if (result) {
+                    (*env)->SetByteArrayRegion(env, result, 0, (jsize)count, (jbyte*)encoding);
+                }
+                LOGI("assembleInstruction: success, %zu bytes", count);
+            } else {
+                int err = ks_asm_fn_ptr ? 0 : -1;
+                if (ks_strerror_fn_ptr) {
+                    // 获取最后错误
+                    LOGE("assembleInstruction: failed for '%s'", assembly);
+                }
+            }
+
+            if (ks_close_fn_ptr && ks) {
+                ks_close_fn_ptr(ks);
+            }
+        }
+    } else {
+        // Keystone 不可用：尝试手动解析简单指令
+        LOGI("assembleInstruction: keystone not available, using fallback parser");
+
+        // 简化版：支持最常见的几条指令的手动汇编
+        // MOV Xd, Xn   -> 0xda010000 | (Xd << 0) | (Xn << 5)
+        // MOVZ Xd, #imm -> 0x52800000 | (Xd << 0) | ((imm >> 0) << 5) & ~(0xFFFF << 5)  -> actually MOVZ encoding is different
+        // NOP           -> 0xd503201f
+        // RET           -> 0xd65f03c0
+
+        // 简单指令表 (助记符 -> 编码规则)
+        // 我们在这里做简化处理：先把指令转为小写，去掉空格
+
+        uint32_t code = 0;
+        int code_len = 4; // ARM64 默认4字节
+
+        // 解析 mov xd, xn 格式
+        {
+            unsigned int xd = 0, xn = 0;
+            if (sscanf(assembly, "mov x%u, x%u", &xd, &xn) == 2) {
+                // D(21)=0 Rm(16-20)=Xn O(11-10)=01 Rd(4-0)=Xd  =>  0b01_000_XXXXX_XXXXX_00_XXXXX
+                code = 0xaa010000 | ((xn & 0x1F) << 16) | ((xd & 0x1F) << 0);
+            }
+        }
+        // 解析 mov wn, wn 格式
+        if (code == 0) {
+            unsigned int wd = 0, wn = 0;
+            if (sscanf(assembly, "mov w%u, w%u", &wd, &wn) == 2) {
+                code = 0x2a000000 | ((wn & 0x1F) << 16) | ((wd & 0x1F) << 0);
+            }
+        }
+        // 解析 mov xd, xn, LSL #n 格式 (简化处理)
+        if (code == 0) {
+            unsigned int xd = 0, xn = 0;
+            if (sscanf(assembly, "mov x%u, x%u, lsl #%u", &xd, &xn, &(unsigned int){0}) == 3) {
+                code = 0xaa010000 | ((xn & 0x1F) << 16) | ((xd & 0x1F) << 0);
+            }
+        }
+        // NOP
+        if (code == 0 && strcasecmp(assembly, "nop") == 0) {
+            code = 0xd503201f;
+        }
+        // RET
+        if (code == 0 && strcasecmp(assembly, "ret") == 0) {
+            code = 0xd65f03c0;
+        }
+        // RET Xn
+        if (code == 0) {
+            unsigned int xn = 31;
+            if (sscanf(assembly, "ret x%u", &xn) == 1) {
+                // RET等价于 RET X30 (无条件分支到LR)
+                // 可以用正式编码: 0xd65f03c0 (RET) 固定返回地址
+                // 但如果要指定寄存器，需要用更复杂的指令
+                // ARM64的RET指令编码固定是 x30
+                code = 0xd65f03c0;
+            }
+        }
+        // B #imm (用户输入十六进制地址，自动转换为相对偏移)
+        if (code == 0) {
+            // 用户输入的数值直接当作十六进制处理
+            unsigned long long target = 0;
+            if (sscanf(assembly, "b #%llx", &target) == 1) {
+                // 跳转偏移 = (目标 - 当前指令地址 - 4) / 4
+                int64_t offset = ((int64_t)target - (int64_t)virtualOffset) / 4;
+                int32_t offset_imm = (int32_t)offset;
+                LOGI("B: target=0x%llx virtualOffset=0x%llx imm=%lld",
+                     target, (unsigned long long)virtualOffset, (long long)offset);
+                code = 0x14000000 | ((uint32_t)offset_imm & 0x03FFFFFF);
+            } else {
+                // 尝试解析负数: b #-100
+                long long target_neg = 0;
+                if (sscanf(assembly, "b #-%llx", &target_neg) == 1) {
+                    int64_t offset = (-((int64_t)target_neg) - (int64_t)virtualOffset) / 4;
+                    int32_t offset_imm = (int32_t)offset;
+                    code = 0x14000000 | ((uint32_t)offset_imm & 0x03FFFFFF);
+                }
+            }
+        }
+        // BL #imm (用户输入十六进制地址，自动转换为相对偏移)
+        if (code == 0) {
+            unsigned long long target = 0;
+            if (sscanf(assembly, "bl #%llx", &target) == 1) {
+                int64_t offset = ((int64_t)target - (int64_t)virtualOffset) / 4;
+                int32_t offset_imm = (int32_t)offset;
+                code = 0x94000000 | ((uint32_t)offset_imm & 0x03FFFFFF);
+            }
+        }
+        // LDR Xd, [SP, #imm] (支持十进制和0x十六进制)
+        if (code == 0) {
+            unsigned int xd = 0;
+            int imm = 0;
+            if (sscanf(assembly, "ldr x%u, [sp, #%d]", &xd, &imm) == 2) {
+                int imm9 = imm / 8;
+                if (imm9 >= -256 && imm9 < 256) {
+                    if (imm9 >= 0) {
+                        code = 0xf940000 | ((xd & 0x1F) << 9) | ((imm9 & 0x1FF) << 12);
+                    }
+                }
+            } else {
+                // 尝试解析 0x 十六进制格式
+                unsigned int xd_hex = 0;
+                unsigned int imm_hex = 0;
+                if (sscanf(assembly, "ldr x%u, [sp, #0x%x]", &xd_hex, &imm_hex) == 2) {
+                    int imm9 = imm_hex / 8;
+                    if (imm9 >= 0 && imm9 < 512) {
+                        code = 0xf940000 | ((xd_hex & 0x1F) << 9) | ((imm9 & 0x1FF) << 12);
+                    }
+                }
+            }
+        }
+        // STR Xd, [SP, #imm] (支持十进制和0x十六进制)
+        if (code == 0) {
+            unsigned int xd = 0;
+            int imm = 0;
+            if (sscanf(assembly, "str x%u, [sp, #%d]", &xd, &imm) == 2) {
+                int imm9 = imm / 8;
+                if (imm9 >= 0 && imm9 < 512) {
+                    code = 0xf900000 | ((xd & 0x1F) << 9) | ((imm9 & 0x1FF) << 12);
+                }
+            } else {
+                // 尝试解析 0x 十六进制格式
+                unsigned int xd_hex = 0;
+                unsigned int imm_hex = 0;
+                if (sscanf(assembly, "str x%u, [sp, #0x%x]", &xd_hex, &imm_hex) == 2) {
+                    int imm9 = imm_hex / 8;
+                    if (imm9 >= 0 && imm9 < 512) {
+                        code = 0xf900000 | ((xd_hex & 0x1F) << 9) | ((imm9 & 0x1FF) << 12);
+                    }
+                }
+            }
+        }
+        // ADD Xd, Xn, Xm
+        if (code == 0) {
+            unsigned int xd = 0, xn = 0, xm = 0;
+            if (sscanf(assembly, "add x%u, x%u, x%u", &xd, &xn, &xm) == 3) {
+                // Rd(4-0) Rn(9-5) Rm(16-20) 0b000_110_00000_XXXXX_000_XXXXX_XXXXX
+                code = 0x8b000000 | ((xm & 0x1F) << 16) | ((xn & 0x1F) << 5) | (xd & 0x1F);
+            }
+        }
+        // SUB Xd, Xn, Xm
+        if (code == 0) {
+            unsigned int xd = 0, xn = 0, xm = 0;
+            if (sscanf(assembly, "sub x%u, x%u, x%u", &xd, &xn, &xm) == 3) {
+                // Rd(4-0) Rn(9-5) Rm(16-20)
+                code = 0xcb000000 | ((xm & 0x1F) << 16) | ((xn & 0x1F) << 5) | (xd & 0x1F);
+            }
+        }
+        // CMP Xn, Xm
+        if (code == 0) {
+            unsigned int xn = 0, xm = 0;
+            if (sscanf(assembly, "cmp x%u, x%u", &xn, &xm) == 2) {
+                // CMP Xn, Xm = SUBS XZR, Xn, Xm
+                code = 0xeb00001f | ((xm & 0x1F) << 16) | ((xn & 0x1F) << 5);
+            }
+        }
+        // CBZ Xn, #target (用户输入十六进制地址，自动转换为相对偏移)
+        if (code == 0) {
+            unsigned int xn = 0;
+            unsigned long long target = 0;
+            if (sscanf(assembly, "cbz x%u, #%llx", &xn, &target) == 2) {
+                int64_t offset = ((int64_t)target - (int64_t)virtualOffset) / 4;
+                int32_t offset_imm = (int32_t)offset;
+                uint32_t rt = xn & 0x1F;
+                code = 0x34000000 | (rt << 0) | ((uint32_t)offset_imm & 0x7FFF);
+            }
+        }
+        // CBNZ Xn, #target (用户输入十六进制地址，自动转换为相对偏移)
+        if (code == 0) {
+            unsigned int xn = 0;
+            unsigned long long target = 0;
+            if (sscanf(assembly, "cbnz x%u, #%llx", &xn, &target) == 2) {
+                int64_t offset = ((int64_t)target - (int64_t)virtualOffset) / 4;
+                int32_t offset_imm = (int32_t)offset;
+                uint32_t rt = xn & 0x1F;
+                code = 0x35000000 | (rt << 0) | ((uint32_t)offset_imm & 0x7FFF);
+            }
+        }
+        if (code != 0) {
+            result = (*env)->NewByteArray(env, 4);
+            if (result) {
+                uint8_t bytes[4] = {
+                    (uint8_t)(code & 0xFF),
+                    (uint8_t)((code >> 8) & 0xFF),
+                    (uint8_t)((code >> 16) & 0xFF),
+                    (uint8_t)((code >> 24) & 0xFF)
+                };
+                (*env)->SetByteArrayRegion(env, result, 0, 4, (jbyte*)bytes);
+            }
+            LOGI("assembleInstruction: fallback assembled '%s' -> 0x%08x", assembly, code);
+        } else {
+            LOGE("assembleInstruction: fallback failed for '%s'", assembly);
+        }
+    }
+
+    (*env)->ReleaseStringUTFChars(env, jAssembly, assembly);
+    return result;
+}
+#endif // 旧 fallback 结束
+
+// ============================================================================
+// 直接写入SO文件 (patch)
+// ============================================================================
+
+JNIEXPORT jint JNICALL
+Java_com_example_anative_core_NativeInvoker_patchInstruction(JNIEnv *env, jclass clazz,
+                                                            jstring jSoPath, jlong virtualOffset,
+                                                            jstring jAssembly) {
+    const char *soPath = (*env)->GetStringUTFChars(env, jSoPath, NULL);
+    const char *assembly = (*env)->GetStringUTFChars(env, jAssembly, NULL);
+    if (!soPath || !assembly) {
+        if (soPath) (*env)->ReleaseStringUTFChars(env, jSoPath, soPath);
+        if (assembly) (*env)->ReleaseStringUTFChars(env, jAssembly, assembly);
+        return -1;
+    }
+
+    LOGI("patchInstruction: file=%s offset=0x%llx asm='%s'",
+         soPath, (unsigned long long)virtualOffset, assembly);
+
+    // 调用 assembleInstruction 获取机器码
+    jclass cls = clazz;
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls,
+            "assembleInstruction", "(Ljava/lang/String;J)[B");
+    jstring jAsm = (*env)->NewStringUTF(env, assembly);
+    jbyteArray jBytes = NULL;
+    if (mid && jAsm) {
+        jBytes = (jbyteArray)(*env)->CallStaticObjectMethod(env, cls, mid, jAsm, (jlong)virtualOffset);
+    }
+    if (!jBytes) {
+        LOGE("patchInstruction: failed to assemble '%s'", assembly);
+        (*env)->ReleaseStringUTFChars(env, jSoPath, soPath);
+        (*env)->ReleaseStringUTFChars(env, jAssembly, assembly);
+        if (jAsm) (*env)->DeleteLocalRef(env, jAsm);
+        return -1;
+    }
+
+    jsize codeLen = (*env)->GetArrayLength(env, jBytes);
+    jbyte *code = (*env)->GetByteArrayElements(env, jBytes, NULL);
+
+    // 打开文件并写入
+    FILE *fp = fopen(soPath, "r+b");
+    if (!fp) {
+        LOGE("patchInstruction: cannot open file %s: %s", soPath, strerror(errno));
+        (*env)->ReleaseByteArrayElements(env, jBytes, code, JNI_ABORT);
+        (*env)->DeleteLocalRef(env, jAsm);
+        (*env)->ReleaseStringUTFChars(env, jSoPath, soPath);
+        (*env)->ReleaseStringUTFChars(env, jAssembly, assembly);
+        return -1;
+    }
+
+    // 将虚拟偏移转为文件偏移
+    off_t fileOffset = (off_t)virtualOffset;  // 简化处理，假设虚拟偏移等于文件偏移
+    if (fseek(fp, fileOffset, SEEK_SET) != 0) {
+        LOGE("patchInstruction: fseek failed: %s", strerror(errno));
+        fclose(fp);
+        (*env)->ReleaseByteArrayElements(env, jBytes, code, JNI_ABORT);
+        (*env)->DeleteLocalRef(env, jAsm);
+        (*env)->ReleaseStringUTFChars(env, jSoPath, soPath);
+        (*env)->ReleaseStringUTFChars(env, jAssembly, assembly);
+        return -1;
+    }
+
+    size_t written = fwrite(code, 1, codeLen, fp);
+    fclose(fp);
+
+    (*env)->ReleaseByteArrayElements(env, jBytes, code, JNI_ABORT);
+    (*env)->DeleteLocalRef(env, jAsm);
+    (*env)->ReleaseStringUTFChars(env, jSoPath, soPath);
+    (*env)->ReleaseStringUTFChars(env, jAssembly, assembly);
+
+    if (written < 0) {
+        LOGE("patchInstruction: fwrite failed: %s", strerror(errno));
+        return -1;
+    }
+
+    LOGI("patchInstruction: successfully wrote %zu bytes at offset 0x%llx", written, (unsigned long long)fileOffset);
+    return (jint)written;
 }

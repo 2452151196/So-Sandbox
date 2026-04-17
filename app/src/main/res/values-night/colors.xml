@@ -52,4 +52,5 @@
     <color name="code_type">#FF4EC9B0</color>
     <color name="code_func">#FFDCDCAA</color>
     <color name="code_num">#FFB5CEA8</color>
+    <color name="code_modified_insn">#FF4CAF50</color>
 </resources>

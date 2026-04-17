@@ -32,7 +32,7 @@ public class XRefAnalyzer {
      * 解析native返回的交叉引用字符串
      * format: "caller|callee|type|caller|callee|type|..."
      */
-    public void parseXRefString(String result, long baseAddress) {
+    public void parseXRefString(String result, long baseAddress, long sourceFuncOffset) {
         outgoing.clear();
         incoming.clear();
 
@@ -51,9 +51,8 @@ public class XRefAnalyzer {
 
                 // 绝对地址 -> 相对地址转换 (用于匹配函数列表)
                 long calleeRel = callee - baseAddress;
-                long callerRel = caller - baseAddress;
 
-                outgoing.computeIfAbsent(callerRel, k -> new ArrayList<>()).add(ref);
+                outgoing.computeIfAbsent(sourceFuncOffset, k -> new ArrayList<>()).add(ref);
                 incoming.computeIfAbsent(calleeRel, k -> new ArrayList<>()).add(ref);
 
             } catch (NumberFormatException e) {

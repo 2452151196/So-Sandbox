@@ -137,7 +137,7 @@
         android:visibility="gone"
         android:indeterminateTint="@color/accent" />
 
-    <!-- Edit Panel -->
+    <!-- Edit Info (只显示最后编辑状态，保存请点右上角) -->
     <LinearLayout
         android:id="@+id/edit_panel"
         android:layout_width="match_parent"
@@ -149,20 +149,11 @@
 
         <TextView
             android:id="@+id/tv_edit_info"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
             android:text="点击字节编辑"
             android:textColor="@color/text_primary"
             android:textSize="14sp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btn_save"
-            android:layout_width="wrap_content"
-            android:layout_height="40dp"
-            android:text="保存"
-            android:textSize="14sp"
-            app:cornerRadius="6dp" />
 
     </LinearLayout>
 

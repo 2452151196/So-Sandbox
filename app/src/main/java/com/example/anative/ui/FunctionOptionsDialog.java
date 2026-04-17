@@ -15,9 +15,9 @@ import androidx.fragment.app.DialogFragment;
 
 import com.example.anative.R;
 import com.example.anative.core.DataHolder;
+import com.example.anative.core.ElfParser;
 import com.example.anative.core.NativeFunction;
-import com.example.anative.core.NativeInvoker;
-import com.example.anative.core.XRefAnalyzer;
+import com.example.anative.core.XRefScanner;
 import com.google.android.material.bottomsheet.BottomSheetDialog;
 import com.google.android.material.button.MaterialButton;
 
@@ -88,29 +88,13 @@ public class FunctionOptionsDialog extends DialogFragment {
         // 交叉引用分析
         btnXrefs.setOnClickListener(v -> {
             new Thread(() -> {
-                // 获取所有函数地址用于匹配
-                long[] allAddrs = DataHolder.getInstance().getFunctions().stream()
-                        .mapToLong(f -> baseAddress + f.getOffset())
-                        .toArray();
-
-                String result = NativeInvoker.analyzeXRefs(absAddr, function.getSize(), allAddrs);
-
-                // 解析并存储
-                XRefAnalyzer xrefs = DataHolder.getInstance().getXRefs();
-                if (xrefs == null) {
-                    xrefs = new XRefAnalyzer();
-                    DataHolder.getInstance().setXRefs(xrefs);
-                }
-                xrefs.parseXRefString(result, baseAddress);
-
-                // 获取此函数的交叉引用信息
-                final List<XRefAnalyzer.XRef> callsFrom = xrefs.getCallsFrom(function.getOffset());
-                final List<XRefAnalyzer.XRef> callsTo = xrefs.getCallsTo(function.getOffset());
+                XRefScanner scanner = ensureXRefScanner();
+                final List<XRefScanner.CallRef> callers = scanner.getCallersOf(function.getOffset());
+                final List<XRefScanner.CallRef> callees = scanner.getCalleesOf(function.getOffset());
 
                 requireActivity().runOnUiThread(() -> {
                     dismiss();
-                    // 打开XRef展示对话框
-                    XRefDialog xrefDialog = XRefDialog.newInstance(function, callsFrom, callsTo, baseAddress);
+                    XRefDialog xrefDialog = XRefDialog.newScannerInstance(function, callers, callees, baseAddress);
                     xrefDialog.show(getParentFragmentManager(), "xrefs");
                 });
             }).start();
@@ -118,5 +102,29 @@ public class FunctionOptionsDialog extends DialogFragment {
 
         dialog.setContentView(view);
         return dialog;
+    }
+
+    private XRefScanner ensureXRefScanner() {
+        String soPath = DataHolder.getInstance().getSoPath();
+        List<NativeFunction> funcs = DataHolder.getInstance().getFunctions();
+        List<ElfParser.StringEntry> strs = DataHolder.getInstance().getStrings();
+        if (strs == null && soPath != null) {
+            try {
+                strs = ElfParser.parseStrings(soPath);
+                DataHolder.getInstance().setStrings(strs);
+            } catch (Exception e) {
+                strs = new java.util.ArrayList<>();
+            }
+        }
+        XRefScanner scanner = DataHolder.getInstance().getXRefScanner();
+        if (scanner == null || !scanner.isScanned()
+                || (!scanner.hasStringData() && strs != null && !strs.isEmpty())) {
+            scanner = new XRefScanner();
+            if (soPath != null && funcs != null) {
+                scanner.scan(soPath, funcs, strs);
+            }
+            DataHolder.getInstance().setXRefScanner(scanner);
+        }
+        return scanner;
     }
 }

@@ -15,9 +15,16 @@ public class DataHolder {
     private List<PltEntry> pltEntries;
     private List<ElfParser.SectionInfo> sections;
     private String soPath;
+    private String originalUri;  // 用户选择的原始文件URI
     private XRefAnalyzer xrefs;
     private XRefScanner xrefScanner;
     private long dlopenHandle;
+
+    // 存储修改的指令: key=offset, value=新的汇编指令字符串
+    private java.util.Map<Long, String> modifiedInstructions = new java.util.HashMap<>();
+
+    // 标记是否有未保存的修改
+    private volatile boolean hasUnsavedChanges = false;
 
     public static DataHolder getInstance() {
         if (instance == null) {
@@ -89,6 +96,14 @@ public class DataHolder {
         return soPath;
     }
 
+    public void setOriginalUri(String uri) {
+        this.originalUri = uri;
+    }
+
+    public String getOriginalUri() {
+        return originalUri;
+    }
+
     public void setXRefScanner(XRefScanner scanner) {
         this.xrefScanner = scanner;
     }
@@ -103,5 +118,48 @@ public class DataHolder {
 
     public long getDlopenHandle() {
         return dlopenHandle;
+    }
+
+    // ========== 指令修改管理 ==========
+
+    public void putModifiedInstruction(long offset, String newAssembly) {
+        modifiedInstructions.put(offset, newAssembly);
+        hasUnsavedChanges = true;
+    }
+
+    public String getModifiedInstruction(long offset) {
+        return modifiedInstructions.get(offset);
+    }
+
+    public boolean hasModifiedInstruction(long offset) {
+        return modifiedInstructions.containsKey(offset);
+    }
+
+    public java.util.Map<Long, String> getAllModifiedInstructions() {
+        return new java.util.HashMap<>(modifiedInstructions);
+    }
+
+    public boolean hasUnsavedChanges() {
+        return hasUnsavedChanges;
+    }
+
+    public void clearUnsavedChanges() {
+        hasUnsavedChanges = false;
+    }
+
+    public int getModifiedCount() {
+        return modifiedInstructions.size();
+    }
+
+    public void removeModifiedInstruction(long offset) {
+        modifiedInstructions.remove(offset);
+        if (modifiedInstructions.isEmpty()) {
+            hasUnsavedChanges = false;
+        }
+    }
+
+    public void clearAllModifiedInstructions() {
+        modifiedInstructions.clear();
+        hasUnsavedChanges = false;
     }
 }

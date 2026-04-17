@@ -192,20 +192,29 @@ public class XRefScanner {
                     if ("F".equals(parts[0])) {
                         // 函数调用: instrAddr处的BL/B跳转到targetAddr
                         NativeFunction caller = findContainingFunction(instrAddr, sortedFuncs);
+                        long callerOffset;
+                        String callerName;
                         if (caller != null) {
-                            NativeFunction callee = funcByOffset.get(targetAddr);
-                            String calleeName = callee != null ? callee.getDemangledName()
-                                    : String.format("sub_%X", targetAddr);
-
-                            // callers: targetAddr被caller调用
-                            CallRef callerRef = new CallRef(instrAddr, caller.getOffset(), caller.getDemangledName());
-                            callersMap.computeIfAbsent(targetAddr, k -> new ArrayList<>()).add(callerRef);
-
-                            // callees: caller调用了targetAddr
-                            CallRef calleeRef = new CallRef(instrAddr, targetAddr, calleeName);
-                            calleesMap.computeIfAbsent(caller.getOffset(), k -> new ArrayList<>()).add(calleeRef);
-                            funcRefs++;
+                            callerOffset = caller.getOffset();
+                            callerName = caller.getDemangledName();
+                        } else {
+                            // Stripped 区域：用合成名
+                            callerOffset = instrAddr;
+                            callerName = String.format("sub_%X", instrAddr);
                         }
+
+                        NativeFunction callee = funcByOffset.get(targetAddr);
+                        String calleeName = callee != null ? callee.getDemangledName()
+                                : String.format("sub_%X", targetAddr);
+
+                        // callers: targetAddr 被 caller 调用
+                        CallRef callerRef = new CallRef(instrAddr, callerOffset, callerName);
+                        callersMap.computeIfAbsent(targetAddr, k -> new ArrayList<>()).add(callerRef);
+
+                        // callees: caller 调用了 targetAddr
+                        CallRef calleeRef = new CallRef(instrAddr, targetAddr, calleeName);
+                        calleesMap.computeIfAbsent(callerOffset, k -> new ArrayList<>()).add(calleeRef);
+                        funcRefs++;
                     } else if ("S".equals(parts[0])) {
                         // 字符串引用: instrAddr处引用了targetAddr
                         NativeFunction func = findContainingFunction(instrAddr, sortedFuncs);
@@ -238,6 +247,33 @@ public class XRefScanner {
     /** 获取某函数调用了谁 */
     public List<CallRef> getCalleesOf(long funcOffset) {
         return calleesMap.getOrDefault(funcOffset, Collections.emptyList());
+    }
+
+    /**
+     * 获取某地址范围 [start, end) 内所有 BL/B 调用目标
+     * 用于合成/stripped 函数：我们不知道它的精确起止，按估计范围查
+     */
+    public List<CallRef> getCalleesInRange(long startOffset, long endOffset) {
+        List<CallRef> result = new ArrayList<>();
+        for (Map.Entry<Long, List<CallRef>> e : calleesMap.entrySet()) {
+            long callerOff = e.getKey();
+            if (callerOff >= startOffset && callerOff < endOffset) {
+                result.addAll(e.getValue());
+            }
+        }
+        // 同时遍历所有 callers 记录，按 instrOffset 过滤（更精确）
+        java.util.Set<Long> seen = new java.util.HashSet<>();
+        List<CallRef> byInstr = new ArrayList<>();
+        for (List<CallRef> list : callersMap.values()) {
+            for (CallRef ref : list) {
+                if (ref.instrOffset >= startOffset && ref.instrOffset < endOffset) {
+                    if (seen.add(ref.instrOffset)) {
+                        byInstr.add(ref);
+                    }
+                }
+            }
+        }
+        return byInstr.isEmpty() ? result : byInstr;
     }
 
     /** 获取引用某字符串的函数列表 */

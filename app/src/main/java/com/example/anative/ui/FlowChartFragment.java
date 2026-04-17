@@ -290,7 +290,12 @@ public class FlowChartFragment extends Fragment {
             }
         } else if (target.startsWith("#")) {
             try {
-                return Long.parseLong(target.substring(1));
+                String numStr = target.substring(1);
+                if (numStr.startsWith("0x") || numStr.startsWith("0X")) {
+                    return Long.parseLong(numStr.substring(2), 16);
+                } else {
+                    return Long.parseLong(numStr, 16);
+                }
             } catch (NumberFormatException e) {
                 return -1;
             }

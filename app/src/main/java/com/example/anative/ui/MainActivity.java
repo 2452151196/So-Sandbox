@@ -168,8 +168,10 @@ public class MainActivity extends AppCompatActivity {
         });
 
         binding.btnRegisterNatives.setOnClickListener(v -> {
-            if (soLoader.getLoadedSoPath() == null) return;
             Intent intent = new Intent(this, RegisterNativesActivity.class);
+            // 如果没有动态加载，启用静态分析模式
+            boolean isStatic = soLoader.getDlopenHandle() == 0;
+            intent.putExtra(RegisterNativesActivity.EXTRA_STATIC_MODE, isStatic);
             startActivity(intent);
         });
     }
@@ -364,6 +366,7 @@ public class MainActivity extends AppCompatActivity {
                 DataHolder.getInstance().setBaseAddress(soLoader.getBaseAddress());
                 DataHolder.getInstance().setDlopenHandle(soLoader.getDlopenHandle());
                 functions = ElfParser.parseFunctions(path);
+                DataHolder.getInstance().setFunctions(functions);
 
                 runOnUiThread(() -> {
                     showSoInfo(path, soLoader.getBaseAddress(), functions.size());
@@ -396,9 +399,17 @@ public class MainActivity extends AppCompatActivity {
                 // 只解析函数列表 (其他按需加载)
                 String soPath = soLoader.getLoadedSoPath();
                 DataHolder.getInstance().setSoPath(soPath);
+                DataHolder.getInstance().setOriginalUri(uri != null ? uri.toString() : null);
                 DataHolder.getInstance().setBaseAddress(soLoader.getBaseAddress());
                 DataHolder.getInstance().setDlopenHandle(soLoader.getDlopenHandle());
                 functions = ElfParser.parseFunctions(soPath);
+                DataHolder.getInstance().setFunctions(functions);
+
+                // 预加载字符串表和 PLT 表（反汇编 / 函数跳转识别都依赖它们）
+                ensureStringsLoaded();
+                ensurePltLoaded();
+                DataHolder.getInstance().setStrings(strings);
+                DataHolder.getInstance().setPltEntries(pltEntries);
 
                 // 持久化保存URI访问权限
                 if (uri != null) {

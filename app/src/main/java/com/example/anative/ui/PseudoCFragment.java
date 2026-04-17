@@ -5,6 +5,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.util.TypedValue;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -24,6 +25,7 @@ import java.util.regex.Pattern;
 
 import org.json.JSONObject;
 import org.json.JSONArray;
+import org.json.JSONTokener;
 
 import com.example.anative.R;
 import com.example.anative.core.DataHolder;
@@ -112,6 +114,7 @@ public class PseudoCFragment extends Fragment {
     @Override
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
+        tvCode.setTextSize(TypedValue.COMPLEX_UNIT_SP, SettingsActivity.getCodeFontSizeSp(requireContext()));
         loadPseudoC();
     }
 
@@ -186,28 +189,31 @@ public class PseudoCFragment extends Fragment {
         }
 
         String prompt = buildAiPrompt(name, asm);
-        String template = (config.template == null || config.template.trim().isEmpty())
-                ? DEFAULT_AI_TEMPLATE
-                : config.template;
-        String requestBody = template
-                .replace("{{url}}", config.url)
-                .replace("{{key}}", config.key)
-                .replace("{{prompt}}", escapeJson(prompt));
+        SettingsActivity.AiConfig resolvedConfig = new SettingsActivity.AiConfig(
+                config.url,
+                config.key,
+                (config.template == null || config.template.trim().isEmpty()) ? DEFAULT_AI_TEMPLATE : config.template,
+                config.responsePath
+        );
+        SettingsActivity.AiRequestSpec spec = SettingsActivity.buildRequestSpec(resolvedConfig, prompt);
 
         HttpURLConnection connection = null;
         try {
-            Log.d(TAG, "AI pseudo-C request URL: " + config.url);
+            Log.d(TAG, "AI pseudo-C request URL: " + spec.url);
+            Log.d(TAG, "AI pseudo-C request method: " + spec.method);
             Log.d(TAG, "AI pseudo-C prompt length: " + prompt.length());
-            connection = (HttpURLConnection) URI.create(config.url).toURL().openConnection();
-            connection.setRequestMethod("POST");
+            connection = (HttpURLConnection) URI.create(spec.url).toURL().openConnection();
+            connection.setRequestMethod(spec.method);
             connection.setConnectTimeout(30000);
             connection.setReadTimeout(60000);
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            connection.setRequestProperty("Authorization", "Bearer " + config.key);
+            boolean hasBody = spec.body != null && !spec.body.isEmpty();
+            connection.setDoOutput(hasBody);
+            SettingsActivity.applyRequestHeaders(connection, spec.headers);
 
-            try (OutputStream os = connection.getOutputStream()) {
-                os.write(requestBody.getBytes(StandardCharsets.UTF_8));
+            if (hasBody) {
+                try (OutputStream os = connection.getOutputStream()) {
+                    os.write(spec.body.getBytes(StandardCharsets.UTF_8));
+                }
             }
 
             int code = connection.getResponseCode();
@@ -218,7 +224,7 @@ public class PseudoCFragment extends Fragment {
             if (code < 200 || code >= 300) {
                 return "ERR: AI 请求失败 HTTP " + code + "\n" + trimResponse(response);
             }
-            String content = extractAiContent(response);
+            String content = extractAiContent(response, spec.responsePath);
             return content == null || content.trim().isEmpty()
                     ? "ERR: AI 返回为空\n" + trimResponse(response)
                     : content.trim();
@@ -286,20 +292,27 @@ public class PseudoCFragment extends Fragment {
                 + "汇编:\n" + asm;
     }
 
-    private String escapeJson(String value) {
-        return value
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r");
-    }
-
-    private String extractAiContent(String response) {
+    private String extractAiContent(String response, String responsePath) {
         if (response == null || response.isEmpty()) {
             return "";
         }
         try {
-            JSONObject json = new JSONObject(response);
+            Object root = new JSONTokener(response).nextValue();
+
+            // 1) 用户配置的 response_path 优先
+            if (responsePath != null && !responsePath.trim().isEmpty()) {
+                String pathValue = extractByPath(root, responsePath.trim());
+                if (pathValue != null && !pathValue.trim().isEmpty()) {
+                    return pathValue;
+                }
+            }
+
+            if (!(root instanceof JSONObject)) {
+                return response;
+            }
+            JSONObject json = (JSONObject) root;
+
+            // 2) OpenAI 风格: choices[0].message.content
             if (json.has("choices")) {
                 JSONArray choices = json.getJSONArray("choices");
                 if (choices.length() > 0) {
@@ -312,13 +325,88 @@ public class PseudoCFragment extends Fragment {
                     }
                 }
             }
-            // 如果标准结构不存在，尝试直接返回
+
+            // 3) Gemini 风格: candidates[0].content.parts[*].text
+            if (json.has("candidates")) {
+                JSONArray candidates = json.getJSONArray("candidates");
+                if (candidates.length() > 0) {
+                    JSONObject first = candidates.optJSONObject(0);
+                    if (first != null) {
+                        JSONObject content = first.optJSONObject("content");
+                        if (content != null) {
+                            JSONArray parts = content.optJSONArray("parts");
+                            if (parts != null && parts.length() > 0) {
+                                StringBuilder sb = new StringBuilder();
+                                for (int i = 0; i < parts.length(); i++) {
+                                    JSONObject part = parts.optJSONObject(i);
+                                    if (part == null) continue;
+                                    String text = part.optString("text", "");
+                                    if (!text.isEmpty()) {
+                                        if (sb.length() > 0) sb.append('\n');
+                                        sb.append(text);
+                                    }
+                                }
+                                if (sb.length() > 0) return sb.toString();
+                            }
+                        }
+                    }
+                }
+            }
+
             return response;
         } catch (Exception e) {
             Log.e(TAG, "Failed to parse AI response as JSON", e);
             // JSON 解析失败，返回原始响应
             return response;
         }
+    }
+
+    private String extractByPath(Object root, String path) {
+        try {
+            Object cur = root;
+            String[] segments = path.split("\\.");
+            for (String seg : segments) {
+                if (seg == null || seg.isEmpty()) continue;
+                cur = resolveSegment(cur, seg);
+                if (cur == null) return null;
+            }
+            if (cur == null) return null;
+            if (cur instanceof String) return (String) cur;
+            return String.valueOf(cur);
+        } catch (Exception e) {
+            Log.w(TAG, "response_path resolve failed: " + path, e);
+            return null;
+        }
+    }
+
+    private Object resolveSegment(Object current, String segment) {
+        if (current == null) return null;
+        int pos = 0;
+        String key = segment;
+        int bracket = segment.indexOf('[');
+        if (bracket >= 0) {
+            key = segment.substring(0, bracket);
+        }
+
+        Object cur = current;
+        if (!key.isEmpty()) {
+            if (!(cur instanceof JSONObject)) return null;
+            cur = ((JSONObject) cur).opt(key);
+        }
+
+        while (bracket >= 0) {
+            int end = segment.indexOf(']', bracket);
+            if (end <= bracket + 1) return null;
+            String idxText = segment.substring(bracket + 1, end).trim();
+            int idx = Integer.parseInt(idxText);
+            if (!(cur instanceof JSONArray)) return null;
+            JSONArray arr = (JSONArray) cur;
+            if (idx < 0 || idx >= arr.length()) return null;
+            cur = arr.opt(idx);
+            pos = end + 1;
+            bracket = segment.indexOf('[', pos);
+        }
+        return cur;
     }
 
     private String readStream(InputStream stream) throws Exception {

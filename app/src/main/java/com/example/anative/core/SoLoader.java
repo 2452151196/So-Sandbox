@@ -6,6 +6,7 @@ import android.util.Log;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -78,6 +79,15 @@ public class SoLoader {
         loadedSoPath = targetFile.getAbsolutePath();
         Log.i(TAG, "SO copied to: " + loadedSoPath);
 
+        // 自动备份：仅在当前工作目录保留一份原始副本
+        try {
+            File backupFile = new File(soDir, originalFileName + ".bak");
+            copyFile(targetFile, backupFile);
+            Log.i(TAG, "SO backup created: " + backupFile.getAbsolutePath());
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to create SO backup: " + e.getMessage());
+        }
+
         if (staticOnly) {
             Log.i(TAG, "Static analysis only mode (user choice)");
             baseAddress = 0;
@@ -95,11 +105,28 @@ public class SoLoader {
         }
         Log.i(TAG, "SO loaded via dlopen, handle=0x" + Long.toHexString(dlopenHandle));
 
-        // 获取基址
-        baseAddress = getBaseAddressFromMaps(loadedSoPath);
-        Log.i(TAG, "Base address: 0x" + Long.toHexString(baseAddress));
+        // 获取基址（任何异常都转为静态分析，不崩溃）
+        try {
+            baseAddress = getBaseAddressFromMapsSafe(loadedSoPath);
+            Log.i(TAG, "Base address: 0x" + Long.toHexString(baseAddress));
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to get base address, switching to static analysis mode: " + e.getMessage());
+            baseAddress = 0;
+        }
 
         return true;
+    }
+
+    /**
+     * 安全封装：任何异常都返回0，绝不崩溃
+     */
+    private long getBaseAddressFromMapsSafe(String soPath) {
+        try {
+            return getBaseAddressFromMaps(soPath);
+        } catch (Throwable t) {
+            Log.w(TAG, "getBaseAddressFromMaps crashed, using static mode: " + t.getMessage());
+            return 0;
+        }
     }
 
     /**
@@ -107,21 +134,51 @@ public class SoLoader {
      */
     private long getBaseAddressFromMaps(String soPath) {
         String soName = new File(soPath).getName();
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(
-                        new java.io.FileInputStream("/proc/self/maps")))) {
+        Log.i(TAG, "Looking for base address of: " + soName);
+        
+        java.io.FileInputStream fis = null;
+        BufferedReader reader = null;
+        try {
+            fis = new java.io.FileInputStream("/proc/self/maps");
+            reader = new BufferedReader(new InputStreamReader(fis));
             String line;
+            int lineCount = 0;
             while ((line = reader.readLine()) != null) {
-                if (line.contains(soName) && line.contains("r-xp")) {
-                    // 格式: 地址范围 权限 偏移 设备 inode 路径
-                    // 如: 7a8c000000-7a8c001000 r-xp 00000000 ...
-                    String addrRange = line.split("\\s+")[0];
-                    String startAddr = addrRange.split("-")[0];
-                    return Long.parseUnsignedLong(startAddr, 16);
+                lineCount++;
+                if (lineCount > 10000) {
+                    Log.w(TAG, "maps file too large, stopping search");
+                    break;
+                }
+                
+                if (line.contains(soName)) {
+                    Log.d(TAG, "Found line with soName: " + line.substring(0, Math.min(100, line.length())));
+                    if (line.contains("r-xp") || line.contains("r--p")) {
+                        try {
+                            String[] parts = line.split("\\s+");
+                            if (parts.length >= 1 && !parts[0].isEmpty()) {
+                                String addrRange = parts[0];
+                                String[] addrs = addrRange.split("-");
+                                if (addrs.length >= 1 && !addrs[0].isEmpty()) {
+                                    long addr = Long.parseUnsignedLong(addrs[0], 16);
+                                    Log.i(TAG, "Found base address: 0x" + Long.toHexString(addr));
+                                    return addr;
+                                }
+                            }
+                        } catch (NumberFormatException e) {
+                            Log.w(TAG, "Failed to parse address from line: " + line.substring(0, Math.min(50, line.length())));
+                            continue;
+                        }
+                    }
                 }
             }
+            Log.w(TAG, "SO not found in /proc/self/maps");
         } catch (Exception e) {
-            Log.e(TAG, "Failed to parse /proc/self/maps", e);
+            Log.e(TAG, "Failed to parse /proc/self/maps: " + e.getMessage(), e);
+        } finally {
+            try {
+                if (reader != null) reader.close();
+                if (fis != null) fis.close();
+            } catch (Exception ignored) {}
         }
         return 0;
     }
@@ -174,5 +231,16 @@ public class SoLoader {
             }
         }
         return fileName;
+    }
+
+    private void copyFile(File src, File dst) throws IOException {
+        try (FileInputStream fis = new FileInputStream(src);
+             FileOutputStream fos = new FileOutputStream(dst)) {
+            byte[] buffer = new byte[8192];
+            int len;
+            while ((len = fis.read(buffer)) != -1) {
+                fos.write(buffer, 0, len);
+            }
+        }
     }
 }

@@ -2,21 +2,31 @@ package com.example.anative.ui;
 
 import android.app.AlertDialog;
 import android.app.ProgressDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.LayoutInflater;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
+import androidx.viewpager2.widget.ViewPager2;
 
 import com.example.anative.R;
 import com.example.anative.core.DataHolder;
@@ -26,10 +36,12 @@ import com.example.anative.core.NativeInvoker;
 import com.example.anative.core.PltEntry;
 import com.example.anative.core.XRefScanner;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.RandomAccessFile;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Map;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -47,6 +59,7 @@ public class AsmFragment extends Fragment {
     private long funcAddr;
     private long funcSize;
     private long baseAddress;
+    private boolean isStaticMode = false;
     private List<ElfParser.StringEntry> stringsList;
     private List<PltEntry> pltList;
 
@@ -89,19 +102,41 @@ public class AsmFragment extends Fragment {
         codeAdapter = new CodeLineAdapter();
         codeAdapter.init(requireContext());
 
-        // 构建函数名集合，用于可点击跳转
         List<NativeFunction> funcs = DataHolder.getInstance().getFunctions();
         if (funcs != null) {
             Set<String> names = new HashSet<>();
-            for (NativeFunction f : funcs) names.add(f.getDemangledName());
+            java.util.Map<Long, String> offsetToName = new java.util.HashMap<>();
+            for (NativeFunction f : funcs) {
+                names.add(f.getDemangledName());
+                // PLT表用文件偏移，函数偏移也要转文件偏移才能匹配
+                long fileOffset = (baseAddress > 0 && f.getOffset() >= baseAddress)
+                        ? (f.getOffset() - baseAddress) : f.getOffset();
+                offsetToName.put(fileOffset, f.getDemangledName());
+            }
             codeAdapter.setFuncNames(names);
+            codeAdapter.setFuncOffsetMap(offsetToName);
+        }
+        // 传入 PLT 偏移集合：命中时优先按 PLT 处理，不做函数自动识别
+        java.util.Set<Long> pltOffsets = new java.util.HashSet<>();
+        if (pltList != null) {
+            for (PltEntry e : pltList) {
+                if (e != null) pltOffsets.add(e.offset);
+            }
+        }
+        codeAdapter.setPltOffsets(pltOffsets);
+        // 当前函数范围 (文件偏移)，用于识别 b #addr 形式的 tail call
+        long curFuncStart = (baseAddress > 0 && funcAddr >= baseAddress)
+                ? (funcAddr - baseAddress) : funcAddr;
+        if (curFuncStart >= 0 && funcSize > 0) {
+            codeAdapter.setCurrentFunctionRange(curFuncStart, curFuncStart + funcSize);
         }
         codeAdapter.setOnLineClickListener(this::onFuncNameClicked);
+        codeAdapter.setOnElementClickListener(this::onElementClicked);
 
         LinearLayoutManager layoutManager = new LinearLayoutManager(requireContext());
         rvCode.setLayoutManager(layoutManager);
         rvCode.setAdapter(codeAdapter);
-        rvCode.setItemAnimator(null); // 禁用动画，更流畅
+        rvCode.setItemAnimator(null);
         rvCode.setHasFixedSize(false);
         rvCode.setNestedScrollingEnabled(false);
 
@@ -121,11 +156,12 @@ public class AsmFragment extends Fragment {
             String stringTable = buildStringTable(stringsList);
             String pltTable = buildPltTable(pltList);
             String funcTable = buildFuncTable();
-            String result;
+            long virtualAddr = (baseAddress > 0 && funcAddr >= baseAddress) ? (funcAddr - baseAddress) : funcAddr;
+            String result = disassembleFromFile(virtualAddr, funcSize, stringTable, pltTable, funcTable);
+            isStaticMode = true;
 
-            if (baseAddress == 0) {
-                result = disassembleFromFile(funcAddr, funcSize, stringTable, pltTable, funcTable);
-            } else {
+            if (result != null && result.startsWith("ERR") && baseAddress > 0) {
+                isStaticMode = false;
                 result = NativeInvoker.disassembleFunctionEx(funcAddr, funcSize, stringTable, pltTable, baseAddress, funcTable);
             }
 
@@ -210,6 +246,349 @@ public class AsmFragment extends Fragment {
         }
     }
 
+    private void onElementClicked(CodeLineAdapter.ClickType clickType, String line, long offset,
+                                  String mnemonic, String operands, String bytes,
+                                  String elementText, int elementIndex) {
+        if (getContext() == null) return;
+        long normalizedOffset = normalizeOffset(offset);
+        switch (clickType) {
+            case INSTRUCTION:
+                showEditInsnDialog(normalizedOffset, mnemonic, operands, bytes, line, clickType, elementText);
+                break;
+            case ADDRESS:
+                showEditInsnDialog(normalizedOffset, mnemonic, operands, bytes, line, clickType, elementText);
+                break;
+            case REGISTER:
+                showEditInsnDialog(normalizedOffset, mnemonic, operands, bytes, line, clickType, elementText);
+                break;
+            case IMMEDIATE:
+                showEditInsnDialog(normalizedOffset, mnemonic, operands, bytes, line, clickType, elementText);
+                break;
+            case FUNCTION_CALL:
+                showFuncCallOptions(normalizedOffset, mnemonic, operands, bytes, line,
+                        elementText);
+                break;
+        }
+    }
+
+    /**
+     * 函数跳转目标的 3 选项弹窗：查看交叉引用 / 修改指令 / 跳转到函数
+     * @param srcOffset 源指令偏移（当前 bl/b 指令的位置）
+     * @param funcName 目标函数名
+     */
+    private void showFuncCallOptions(long srcOffset, String mnemonic, String operands,
+                                     String bytes, String line, String funcName) {
+        if (getContext() == null || funcName == null) return;
+        NativeFunction target = findFunctionByName(funcName);
+        if (target == null) {
+            // 找不到目标函数时退化为普通修改
+            showEditInsnDialog(srcOffset, mnemonic, operands, bytes, line,
+                    CodeLineAdapter.ClickType.INSTRUCTION, null);
+            return;
+        }
+
+        new AlertDialog.Builder(requireContext())
+                .setTitle(funcName)
+                .setItems(new String[]{"跳转到函数", "查找交叉引用", "修改此指令"}, (dialog, which) -> {
+                    switch (which) {
+                        case 0:
+                            navigateToFunction(target);
+                            break;
+                        case 1:
+                            showXRefs(target);
+                            break;
+                        case 2:
+                            showEditInsnDialog(srcOffset, mnemonic, operands, bytes, line,
+                                    CodeLineAdapter.ClickType.INSTRUCTION, null);
+                            break;
+                    }
+                })
+                .show();
+    }
+
+    private NativeFunction findFunctionByName(String funcName) {
+        List<NativeFunction> funcs = DataHolder.getInstance().getFunctions();
+        if (funcs == null) return null;
+        for (NativeFunction f : funcs) {
+            if (f.getDemangledName().equals(funcName) || f.getName().equals(funcName)) {
+                return f;
+            }
+        }
+        Matcher matcher = SYNTHETIC_FUNC_PATTERN.matcher(funcName);
+        if (matcher.matches()) {
+            try {
+                long offset = Long.parseLong(matcher.group(1), 16);
+                long estimatedSize = estimateSyntheticFunctionSize(offset);
+                return new NativeFunction(funcName, offset, estimatedSize, "disasm_synthetic");
+            } catch (NumberFormatException ignored) {}
+        }
+        return null;
+    }
+
+    private long normalizeOffset(long offset) {
+        if (offset < 0) return offset;
+        long funcStartOffset = (baseAddress > 0 && funcAddr >= baseAddress) ? (funcAddr - baseAddress) : funcAddr;
+        if (funcStartOffset > 0 && funcSize > 0 && offset < funcSize) {
+            return funcStartOffset + offset;
+        }
+        return offset;
+    }
+
+    private String normalizeHexInAssembly(String asm) {
+        return asm;
+    }
+
+    private void showEditInsnDialog(long offset, String mnemonic, String operands, String bytes,
+                                    String originalLine, CodeLineAdapter.ClickType clickType,
+                                    String elementText) {
+        LayoutInflater inflater = LayoutInflater.from(requireContext());
+        View view = inflater.inflate(R.layout.dialog_edit_instruction, null, false);
+
+        EditText etAssembly = view.findViewById(R.id.et_assembly);
+        TextView tvOriginalBytes = view.findViewById(R.id.tv_original_bytes);
+        TextView tvNewBytes = view.findViewById(R.id.tv_new_bytes);
+        TextView tvOriginalLine = view.findViewById(R.id.tv_original_line);
+        TextView tvClickType = view.findViewById(R.id.tv_click_type);
+        TextView tvSelectedElement = view.findViewById(R.id.tv_selected_element);
+        LinearLayout layoutQuickOps = view.findViewById(R.id.layout_quick_operands);
+
+        // 显示原始信息
+        if (originalLine != null && !originalLine.isEmpty()) {
+            tvOriginalLine.setText(originalLine);
+            tvOriginalLine.setVisibility(View.VISIBLE);
+        }
+        if (bytes != null && !bytes.isEmpty()) {
+            tvOriginalBytes.setText(bytes);
+        } else {
+            tvOriginalBytes.setText("无");
+        }
+
+        // 显示点击类型
+        String clickTypeStr = "";
+        switch (clickType) {
+            case ADDRESS: clickTypeStr = "点击位置: 地址"; break;
+            case REGISTER: clickTypeStr = "点击位置: 寄存器 " + (elementText != null ? elementText : ""); break;
+            case IMMEDIATE: clickTypeStr = "点击位置: 立即数 " + (elementText != null ? elementText : ""); break;
+            case INSTRUCTION: clickTypeStr = "点击位置: 指令"; break;
+        }
+        tvClickType.setText(clickTypeStr);
+        tvClickType.setVisibility(View.VISIBLE);
+
+        // 显示选中的元素
+        if (elementText != null) {
+            tvSelectedElement.setText(elementText);
+            tvSelectedElement.setVisibility(View.VISIBLE);
+        }
+
+        // 预填充汇编指令
+        String currentAsm = (mnemonic != null && !mnemonic.isEmpty())
+                ? (mnemonic + (operands != null && !operands.isEmpty() ? " " + operands : ""))
+                : "";
+        etAssembly.setText(currentAsm);
+        tvNewBytes.setText("输入汇编后自动计算");
+
+        // 初始化寄存器编辑框
+        initRegisterFields(view, operands);
+
+        // 使用文件虚拟偏移作为PC
+        long pcAddr = offset;
+
+        // 实时预览新机器码
+        TextWatcherImpl watcher = new TextWatcherImpl(etAssembly, tvNewBytes, pcAddr);
+        etAssembly.addTextChangedListener(watcher);
+
+        String title = String.format("编辑指令 (偏移: 0x%X)", offset);
+        final long finalOffset = offset;
+        new AlertDialog.Builder(requireContext())
+                .setTitle(title)
+                .setView(view)
+                .setPositiveButton("确定", (dialog, which) -> {
+                    String newAsm = etAssembly.getText().toString().trim();
+                    if (newAsm.isEmpty()) {
+                        Toast.makeText(requireContext(), "指令不能为空", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    patchInstruction(finalOffset, newAsm);
+                })
+                .setNeutralButton("替换整行", (dialog, which) -> {
+                    String newAsm = etAssembly.getText().toString().trim();
+                    if (newAsm.isEmpty()) return;
+                    patchInstruction(finalOffset, newAsm);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void initRegisterFields(View dialogView, String operands) {
+        if (operands == null || operands.isEmpty()) return;
+
+        String[] parts = operands.split(",");
+        EditText[] regFields = {
+                dialogView.findViewById(R.id.et_reg_x0),
+                dialogView.findViewById(R.id.et_reg_x1),
+                dialogView.findViewById(R.id.et_reg_x2),
+                dialogView.findViewById(R.id.et_reg_x3)
+        };
+
+        java.util.regex.Pattern regPat = java.util.regex.Pattern.compile("\\b(sp|lr|xzr|wzr|fp|x[0-9]+|w[0-9]+|v[0-9]+|s[0-9]+|d[0-9]+|q[0-9]+)\\b");
+        java.util.regex.Matcher m = regPat.matcher(operands);
+        int idx = 0;
+        while (m.find() && idx < regFields.length) {
+            regFields[idx].setText(m.group());
+            idx++;
+        }
+    }
+
+    private static class TextWatcherImpl implements android.text.TextWatcher {
+        private final EditText etAssembly;
+        private final TextView tvNewBytes;
+        private final Handler handler = new Handler(Looper.getMainLooper());
+        private final long virtualOffset;
+
+        TextWatcherImpl(EditText et, TextView tv, long virtualOffset) {
+            this.etAssembly = et;
+            this.tvNewBytes = tv;
+            this.virtualOffset = virtualOffset;
+        }
+
+        @Override
+        public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+        @Override
+        public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+        @Override
+        public void afterTextChanged(android.text.Editable s) {
+            handler.removeCallbacksAndMessages(null);
+            handler.postDelayed(() -> {
+                String asm = s.toString().trim();
+                if (asm.isEmpty()) {
+                    tvNewBytes.setText("输入汇编后自动计算");
+                    return;
+                }
+                new Thread(() -> {
+                    try {
+                        byte[] bytes = com.example.anative.core.NativeInvoker.assembleInstruction(asm, virtualOffset);
+                        if (bytes != null && bytes.length > 0) {
+                            StringBuilder sb = new StringBuilder();
+                            for (byte b : bytes) {
+                                sb.append(String.format("%02X ", b & 0xFF));
+                            }
+                            String finalBytes = sb.toString().trim();
+                            handler.post(() -> tvNewBytes.setText(finalBytes));
+                        } else {
+                            String err = com.example.anative.core.NativeInvoker.getLastAssembleError();
+                            final String msg = (err != null && !err.isEmpty()) ? err : "无法汇编";
+                            handler.post(() -> tvNewBytes.setText(msg));
+                        }
+                    } catch (Exception e) {
+                        handler.post(() -> tvNewBytes.setText("汇编失败: " + e.getMessage()));
+                    }
+                }).start();
+            }, 500);
+        }
+    }
+
+    private void updateDisplay() {
+        if (codeAdapter != null) {
+            // 重新加载汇编代码并显示
+            loadAssembly();
+        }
+        // 通知其他 Fragment 刷新
+        notifyRefresh();
+    }
+
+    private void notifyRefresh() {
+        if (getActivity() instanceof FunctionDetailActivity) {
+            FunctionDetailActivity activity = (FunctionDetailActivity) getActivity();
+            ViewPager2 viewPager = activity.findViewById(R.id.viewPager);
+            if (viewPager != null && viewPager.getAdapter() instanceof FunctionPagerAdapter) {
+                ((FunctionPagerAdapter) viewPager.getAdapter()).refreshAllFragments();
+            }
+        }
+    }
+
+    public void refreshDisplay() {
+        if (codeAdapter != null) {
+            loadAssembly();
+        }
+    }
+
+    private void patchInstruction(long offset, String assembly) {
+        String soPath = DataHolder.getInstance().getSoPath();
+
+        if (soPath == null || soPath.isEmpty()) {
+            Toast.makeText(requireContext(), "SO文件路径未知", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        ProgressDialog pd = new ProgressDialog(requireContext());
+        pd.setMessage("正在写入当前文件...");
+        pd.setCancelable(false);
+        pd.show();
+
+        final long virtualOffset = offset;
+        final String newAsm = assembly;
+        executor.execute(() -> {
+            try {
+                long fileOffset = ElfParser.virtualAddrToFileOffset(soPath, virtualOffset);
+                byte[] encoded = NativeInvoker.assembleInstruction(newAsm, virtualOffset);
+                if (encoded == null || encoded.length == 0) {
+                    String err = NativeInvoker.getLastAssembleError();
+                    throw new Exception(err != null && !err.isEmpty() ? err : "汇编失败");
+                }
+
+                try (RandomAccessFile raf = new RandomAccessFile(soPath, "rw")) {
+                    raf.seek(fileOffset);
+                    raf.write(encoded);
+                }
+
+                handler.post(() -> {
+                    pd.dismiss();
+                    Toast.makeText(requireContext(), "已写入当前文件", Toast.LENGTH_SHORT).show();
+                    DataHolder.getInstance().clearUnsavedChanges();
+                    updateDisplay();
+                });
+            } catch (Exception e) {
+                handler.post(() -> {
+                    pd.dismiss();
+                    Toast.makeText(requireContext(), "写入失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void showSaveSuccessDialog(File savedFile) {
+        String path = savedFile.getAbsolutePath();
+        new AlertDialog.Builder(requireContext())
+                .setTitle("保存成功")
+                .setMessage(path)
+                .setPositiveButton("复制路径", (dialog, which) -> {
+                    ClipboardManager cm = (ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(ClipData.newPlainText("SO路径", path));
+                    Toast.makeText(requireContext(), "已复制", Toast.LENGTH_SHORT).show();
+                })
+                .setNeutralButton("打开目录", (dialog, which) -> {
+                    try {
+                        Intent openDir = new Intent(Intent.ACTION_VIEW);
+                        Uri dirUri = Uri.parse("file://" + savedFile.getParent());
+                        openDir.setDataAndType(dirUri, "resource/folder");
+                        startActivity(openDir);
+                    } catch (Exception e) {
+                        try {
+                            Intent intent = Intent.createChooser(
+                                    new Intent(Intent.ACTION_VIEW).setDataAndType(
+                                            Uri.parse("file://" + savedFile.getParent()), "*/*"), "打开目录");
+                            startActivity(intent);
+                        } catch (Exception e2) {
+                            Toast.makeText(requireContext(), "无法打开目录", Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
     private long estimateSyntheticFunctionSize(long offset) {
         List<NativeFunction> funcs = DataHolder.getInstance().getFunctions();
         if (funcs != null && !funcs.isEmpty()) {
@@ -268,9 +647,23 @@ public class AsmFragment extends Fragment {
             List<XRefScanner.CallRef> callers = scanner.getCallersOf(func.getOffset());
             List<XRefScanner.CallRef> callees = scanner.getCalleesOf(func.getOffset());
 
+            // 合成函数 (sub_XXXX) 的精确起止是未知的，用地址范围找 callees
+            boolean isSynthetic = "disasm_synthetic".equals(func.getSource())
+                    || "discovered".equals(func.getSource())
+                    || "text_scan".equals(func.getSource())
+                    || "init_array".equals(func.getSource())
+                    || "fini_array".equals(func.getSource());
+            if (isSynthetic || callees.isEmpty()) {
+                long size = func.getSize() > 0 ? func.getSize() : estimateSyntheticFunctionSize(func.getOffset());
+                List<XRefScanner.CallRef> ranged = scanner.getCalleesInRange(
+                        func.getOffset(), func.getOffset() + size);
+                if (!ranged.isEmpty()) callees = ranged;
+            }
+
+            final List<XRefScanner.CallRef> finalCallees = callees;
             handler.post(() -> {
                 pd.dismiss();
-                showXRefResultDialog(func, callers, callees);
+                showXRefResultDialog(func, callers, finalCallees);
             });
         });
     }
@@ -278,7 +671,6 @@ public class AsmFragment extends Fragment {
     private XRefScanner ensureXRefScanner() {
         String soPath = DataHolder.getInstance().getSoPath();
         List<NativeFunction> funcs = DataHolder.getInstance().getFunctions();
-        // 确保字符串已加载
         List<ElfParser.StringEntry> strs = DataHolder.getInstance().getStrings();
         if (strs == null && soPath != null) {
             try {
@@ -289,7 +681,6 @@ public class AsmFragment extends Fragment {
             }
         }
         XRefScanner scanner = DataHolder.getInstance().getXRefScanner();
-        // 如果没扫描过，或之前扫描时没有字符串数据但现在有了，重新扫描
         if (scanner == null || !scanner.isScanned()
                 || (!scanner.hasStringData() && strs != null && !strs.isEmpty())) {
             scanner = new XRefScanner();
@@ -306,72 +697,9 @@ public class AsmFragment extends Fragment {
                                       List<XRefScanner.CallRef> callees) {
         if (getContext() == null) return;
 
-        StringBuilder sb = new StringBuilder();
-
-        sb.append("被以下函数调用 (").append(callers.size()).append("):\n");
-        if (callers.isEmpty()) {
-            sb.append("  (无)\n");
-        } else {
-            for (XRefScanner.CallRef ref : callers) {
-                sb.append(String.format("  %s @ 0x%X\n", ref.callerFuncName, ref.instrOffset));
-            }
-        }
-
-        sb.append("\n此函数调用 (").append(callees.size()).append("):\n");
-        if (callees.isEmpty()) {
-            sb.append("  (无)\n");
-        } else {
-            for (XRefScanner.CallRef ref : callees) {
-                sb.append(String.format("  %s @ 0x%X\n", ref.callerFuncName, ref.instrOffset));
-            }
-        }
-
-        // 构建可点击列表
-        List<NativeFunction> allFuncs = DataHolder.getInstance().getFunctions();
-        Map<Long, NativeFunction> funcByOffset = new HashMap<>();
-        if (allFuncs != null) {
-            for (NativeFunction f : allFuncs) funcByOffset.put(f.getOffset(), f);
-        }
-
-        // 合并去重可跳转的函数
-        java.util.LinkedHashMap<Long, String> navTargets = new java.util.LinkedHashMap<>();
-        for (XRefScanner.CallRef ref : callers) {
-            navTargets.put(ref.callerFuncOffset, ref.callerFuncName);
-        }
-        for (XRefScanner.CallRef ref : callees) {
-            navTargets.put(ref.callerFuncOffset, ref.callerFuncName);
-        }
-
-        if (navTargets.isEmpty()) {
-            new AlertDialog.Builder(requireContext())
-                    .setTitle("交叉引用: " + func.getDemangledName())
-                    .setMessage(sb.toString())
-                    .setPositiveButton("确定", null)
-                    .show();
-        } else {
-            String[] items = new String[navTargets.size()];
-            Long[] offsets = new Long[navTargets.size()];
-            int idx = 0;
-            for (Map.Entry<Long, String> e : navTargets.entrySet()) {
-                boolean isCaller = false;
-                for (XRefScanner.CallRef ref : callers) {
-                    if (ref.callerFuncOffset == e.getKey()) { isCaller = true; break; }
-                }
-                String prefix = isCaller ? "← " : "→ ";
-                items[idx] = prefix + e.getValue() + String.format(" (0x%X)", e.getKey());
-                offsets[idx] = e.getKey();
-                idx++;
-            }
-
-            new AlertDialog.Builder(requireContext())
-                    .setTitle("交叉引用: " + func.getDemangledName())
-                    .setItems(items, (dialog, which) -> {
-                        NativeFunction target = funcByOffset.get(offsets[which]);
-                        if (target != null) navigateToFunction(target);
-                    })
-                    .setPositiveButton("关闭", null)
-                    .show();
-        }
+        long baseAddress = DataHolder.getInstance().getBaseAddress();
+        XRefDialog dialog = XRefDialog.newScannerInstance(func, callers, callees, baseAddress);
+        dialog.show(getChildFragmentManager(), "xrefs");
     }
 
     @Override

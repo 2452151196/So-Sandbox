@@ -30,6 +30,7 @@
     <color name="chart_shadow">#20000000</color>
 
     <!-- Shared accent - Modern Teal/Cyan -->
+    <color name="colorAccent">#FF2196F3</color>
     <color name="accent">#FF009688</color>
     <color name="accent_variant">#FF00796B</color>
     <color name="accent_light">#FF4DB6AC</color>
@@ -63,6 +64,7 @@
     <color name="code_type">#FF267F99</color>
     <color name="code_func">#FF795E26</color>
     <color name="code_num">#FF098658</color>
+    <color name="code_modified_insn">#FF4CAF50</color>
 
     <!-- Legacy alias -->
     <color name="cyan_500">@color/accent</color>
