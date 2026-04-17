@@ -156,7 +156,6 @@ public class XRefDialog extends DialogFragment {
         });
 
         builder.setView(view);
-        builder.setPositiveButton("关闭", null);
         return builder.create();
     }
 
@@ -207,10 +206,15 @@ public class XRefDialog extends DialogFragment {
     }
 
     private void updateTabState(Button btnCalls, Button btnCalled, boolean showCalls) {
-        int selectedBg = 0xFF1976D2;
-        int selectedText = 0xFFFFFFFF;
-        int normalBg = 0xFFE0E0E0;
-        int normalText = 0xFF222222;
+        // 检测夜间模式
+        int nightMode = getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        boolean isNight = nightMode == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+
+        // 夜间模式使用柔和的颜色
+        int selectedBg = isNight ? 0xFF1565C0 : 0xFF1976D2;  // 深蓝/亮蓝
+        int selectedText = 0xFFFFFFFF;  // 白色文字
+        int normalBg = isNight ? 0xFF424242 : 0xFFE0E0E0;   // 深灰/浅灰
+        int normalText = isNight ? 0xFFFFFFFF : 0xFF222222; // 白色/深灰
 
         btnCalls.setBackgroundColor(showCalls ? selectedBg : normalBg);
         btnCalls.setTextColor(showCalls ? selectedText : normalText);
