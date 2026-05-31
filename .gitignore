@@ -35,5 +35,14 @@ __pycache__/
 # Large binary files
 *.tar.gz
 
-# Data files
-cloud/server_data.json
+# Server files
+cloud/
+
+# IDE
+.cursor/
+.vscode/
+
+# Unused modules
+annotation/
+hooklib/
+nativehook/
