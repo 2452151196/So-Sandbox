@@ -4,11 +4,12 @@
  */
 
 function onRequest(request, response, modules) {
-    const { deviceId, timestamp, sign } = request.body || {};
+    const crypto = require('crypto');
+    const { deviceId, fingerprint, timestamp, sign } = request.body || {};
     
-    // 简单签名验证
+    // 使用设备指纹作为密钥
     const secret = 'dtzc-key-2024';
-    const expect = modules.oCrypto.md5(deviceId + timestamp + secret).substring(0, 16);
+    const expect = crypto.createHash('md5').update(fingerprint + timestamp + secret).digest('hex').substring(0, 16);
     
     if (sign !== expect) {
         response.end(JSON.stringify({ ok: false }));
@@ -19,7 +20,7 @@ function onRequest(request, response, modules) {
     const oData = modules.oData;
     oData.find({
         table: 'LicensedDevices',
-        where: { deviceId: deviceId }
+        where: { deviceId: deviceId }  // 仍然用deviceId查询数据库
     }).then(function(data) {
         const result = JSON.parse(data);
         
@@ -40,14 +41,22 @@ function onRequest(request, response, modules) {
             return;
         }
         
-        // ========== 核心：生成加密字符串 ==========
-        // 这个字符串就是功能开关密钥
-        const key = generateKey(deviceId, device.vip);
+        // ========== 核心：生成加密的必需数据 ==========
+        // 使用设备指纹作为加密密钥
+        const cloudData = {
+            // 必需数据1: JNI_OnLoad字符串（加密）
+            symbol: encrypt('JNI_OnLoad', fingerprint),
+            
+            // 必需数据2: MAX_CAPTURED数组大小（加密）
+            maxCapture: encrypt('256', fingerprint),  // 默认256
+            
+            // 必需数据3: page_size（加密）
+            pageSize: encrypt('4096', fingerprint)   // 默认4096
+        };
         
         response.end(JSON.stringify({
             ok: true,
-            // 加密后的密钥（客户端用固定算法解密）
-            data: encrypt(key, deviceId)
+            data: cloudData
         }));
         
     }).catch(function(err) {
@@ -74,14 +83,28 @@ function generateKey(deviceId, isVip) {
 }
 
 /**
- * 简单XOR加密
+ * AES-256-CBC加密
  */
 function encrypt(text, key) {
-    let result = '';
-    for (let i = 0; i < text.length; i++) {
-        result += String.fromCharCode(
-            text.charCodeAt(i) ^ key.charCodeAt(i % key.length)
-        );
-    }
-    return Buffer.from(result).toString('base64');
+    const crypto = require('crypto');
+    
+    // 生成随机IV（16字节）
+    const iv = crypto.randomBytes(16);
+    
+    // 生成随机盐（8字节）
+    const salt = crypto.randomBytes(8);
+    
+    // 派生密钥：PBKDF2(key + salt, 10000次)
+    const derivedKey = crypto.pbkdf2Sync(key + salt.toString('hex'), salt, 10000, 32, 'sha256');
+    
+    // AES-256-CBC加密
+    const cipher = crypto.createCipheriv('aes-256-cbc', derivedKey, iv);
+    let encrypted = cipher.update(text, 'utf8', 'binary');
+    encrypted += cipher.final('binary');
+    
+    // 组合：salt(8) + iv(16) + ciphertext
+    const combined = Buffer.concat([salt, iv, Buffer.from(encrypted, 'binary')]);
+    
+    // Base64编码
+    return combined.toString('base64');
 }

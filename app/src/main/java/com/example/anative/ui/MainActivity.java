@@ -29,6 +29,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.example.anative.R;
+import com.example.anative.FileUtils;
 import com.example.anative.core.ElfParser;
 import com.example.anative.core.DataHolder;
 import com.example.anative.core.NativeFunction;
@@ -41,6 +42,8 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
+import android.net.Uri;
+
 public class MainActivity extends AppCompatActivity {
 
     private ActivityMainBinding binding;
@@ -52,6 +55,7 @@ public class MainActivity extends AppCompatActivity {
     private RecentProjectsAdapter recentAdapter;
     private static final String PREFS_RECENT = "recent_projects";
     private static final int MAX_RECENT = 10;
+    private AlertDialog loadingDialog;
 
     private final ActivityResultLauncher<String[]> filePickerLauncher =
             registerForActivityResult(
@@ -97,6 +101,12 @@ public class MainActivity extends AppCompatActivity {
         // 初始化最近项目列表
         setupRecentProjects();
 
+        // 显示新版本更新日志（每个版本只显示一次）
+        showChangelogIfNeeded();
+
+        // 检查是否有未查看的崩溃日志
+        showCrashLogIfNeeded();
+
         // 恢复之前加载的 SO 文件（主题切换后）
         if (savedInstanceState != null) {
             String savedPath = savedInstanceState.getString("loaded_so_path");
@@ -105,16 +115,15 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // 初始化崩溃保护 + RegisterNatives Hook
+        // 初始化崩溃保护（RegisterNatives Hook 仅在调用目标SO前后短暂启用）
         try {
             NativeInvoker.initCrashProtection();
-            NativeInvoker.hookRegisterNatives();
         } catch (UnsatisfiedLinkError e) {
             // Native lib may not be loaded yet on first run
         }
 
         binding.btnSelectSo.setOnClickListener(v -> {
-            filePickerLauncher.launch(new String[]{"*/*"});
+            filePickerLauncher.launch(new String[]{"application/x-sharedlib", "application/x-executable", "application/octet-stream", "*/*"});
         });
 
         binding.btnViewFunctions.setOnClickListener(v -> {
@@ -174,6 +183,55 @@ public class MainActivity extends AppCompatActivity {
             intent.putExtra(RegisterNativesActivity.EXTRA_STATIC_MODE, isStatic);
             startActivity(intent);
         });
+
+        // 处理从其他应用打开的文件
+        handleIncomingFile();
+
+        // 启动时检测更新
+        checkForUpdateOnStart();
+    }
+
+    /**
+     * 处理从外部应用传入的 SO 文件
+     */
+    private void handleIncomingFile() {
+        Intent intent = getIntent();
+        if (intent == null) return;
+
+        String action = intent.getAction();
+        if (action == null) return;
+
+        Uri fileUri = null;
+
+        switch (action) {
+            case Intent.ACTION_VIEW:
+                // 文件管理器点击打开
+                fileUri = intent.getData();
+                break;
+            case Intent.ACTION_SEND:
+                // 分享到本应用
+                fileUri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                break;
+            case Intent.ACTION_SEND_MULTIPLE:
+                // 多个文件分享，只取第一个
+                ArrayList<Uri> uris = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+                if (uris != null && !uris.isEmpty()) {
+                    fileUri = uris.get(0);
+                }
+                break;
+        }
+
+        if (fileUri != null) {
+            final Uri finalUri = fileUri;
+            // 外部打开也弹出加载模式选择，支持动态加载
+            new AlertDialog.Builder(this)
+                    .setTitle("加载模式")
+                    .setMessage("选择SO加载方式")
+                    .setPositiveButton("动态加载", (d, w) -> doLoadSo(finalUri, false))
+                    .setNegativeButton("仅静态分析", (d, w) -> doLoadSo(finalUri, true))
+                    .setCancelable(true)
+                    .show();
+        }
     }
 
     private void setupRecentProjects() {
@@ -273,16 +331,15 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onRecentProjectClick(RecentProject project) {
-        // 使用原始URI重新加载文件
-        if (project.originalUri == null || project.originalUri.isEmpty()) {
-            Toast.makeText(this, "无法获取原始文件路径", Toast.LENGTH_SHORT).show();
-            return;
+        Uri uri;
+        if (project.originalUri != null && !project.originalUri.isEmpty()) {
+            uri = Uri.parse(project.originalUri);
+        } else {
+            uri = Uri.fromFile(new File(project.path));
         }
-        
-        Uri uri = Uri.parse(project.originalUri);
-        
-        // 检查是否仍有权限访问此URI
-        if (!hasUriPermission(uri)) {
+
+        // 只有 content:// URI 才需要检查持久化权限
+        if ("content".equals(uri.getScheme()) && !hasUriPermission(uri)) {
             new AlertDialog.Builder(this)
                     .setTitle("权限已过期")
                     .setMessage("无法访问该文件，权限已过期。请重新选择文件。")
@@ -291,7 +348,7 @@ public class MainActivity extends AppCompatActivity {
                     .show();
             return;
         }
-        
+
         new AlertDialog.Builder(this)
                 .setTitle("加载模式")
                 .setMessage("选择SO加载方式")
@@ -344,6 +401,10 @@ public class MainActivity extends AppCompatActivity {
      * 主题切换后恢复 SO 文件（使用静态分析模式）
      */
     private void reloadSoFile(String path) {
+        reloadSoFile(path, Uri.fromFile(new File(path)).toString());
+    }
+
+    private void reloadSoFile(String path, String originalUri) {
         // 先检查文件是否存在
         File soFile = new File(path);
         if (!soFile.exists()) {
@@ -351,13 +412,18 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        showLoadingDialog("正在恢复 SO 文件...");
+
         new Thread(() -> {
             try {
                 // 从路径创建 Uri
                 Uri uri = Uri.fromFile(soFile);
                 boolean loaded = soLoader.loadSo(uri, true); // 静态分析模式
                 if (!loaded) {
-                    Log.w("MainActivity", "恢复 SO 文件失败: " + path);
+                    runOnUiThread(() -> {
+                        dismissLoadingDialog();
+                        Log.w("MainActivity", "恢复 SO 文件失败: " + path);
+                    });
                     return;
                 }
 
@@ -365,14 +431,23 @@ public class MainActivity extends AppCompatActivity {
                 DataHolder.getInstance().setSoPath(path);
                 DataHolder.getInstance().setBaseAddress(soLoader.getBaseAddress());
                 DataHolder.getInstance().setDlopenHandle(soLoader.getDlopenHandle());
-                functions = ElfParser.parseFunctions(path);
+                String discoveryMode = getSharedPreferences("app_prefs", MODE_PRIVATE)
+                        .getString(SettingsActivity.PREF_FUNCTION_DISCOVERY_MODE, "balanced");
+                functions = ElfParser.parseFunctions(path, discoveryMode);
                 DataHolder.getInstance().setFunctions(functions);
 
                 runOnUiThread(() -> {
+                    dismissLoadingDialog();
                     showSoInfo(path, soLoader.getBaseAddress(), functions.size());
+                    if (originalUri != null && !originalUri.isEmpty()) {
+                        addToRecentProjects(path, originalUri, functions.size());
+                    }
                 });
             } catch (Exception e) {
-                Log.e("MainActivity", "恢复 SO 文件错误: " + e.getMessage());
+                runOnUiThread(() -> {
+                    dismissLoadingDialog();
+                    Log.e("MainActivity", "恢复 SO 文件错误: " + e.getMessage());
+                });
             }
         }).start();
     }
@@ -380,6 +455,7 @@ public class MainActivity extends AppCompatActivity {
     private void doLoadSo(Uri uri, boolean staticOnly) {
         showLoading(true);
         hideError();
+        showLoadingDialog("正在加载 SO 文件...");
 
         // 清除旧数据
         strings = null;
@@ -391,6 +467,7 @@ public class MainActivity extends AppCompatActivity {
                 if (!loaded) {
                     runOnUiThread(() -> {
                         showLoading(false);
+                        dismissLoadingDialog();
                         showError("加载SO失败");
                     });
                     return;
@@ -402,7 +479,9 @@ public class MainActivity extends AppCompatActivity {
                 DataHolder.getInstance().setOriginalUri(uri != null ? uri.toString() : null);
                 DataHolder.getInstance().setBaseAddress(soLoader.getBaseAddress());
                 DataHolder.getInstance().setDlopenHandle(soLoader.getDlopenHandle());
-                functions = ElfParser.parseFunctions(soPath);
+                String discoveryMode = getSharedPreferences("app_prefs", MODE_PRIVATE)
+                        .getString(SettingsActivity.PREF_FUNCTION_DISCOVERY_MODE, "balanced");
+                functions = ElfParser.parseFunctions(soPath, discoveryMode);
                 DataHolder.getInstance().setFunctions(functions);
 
                 // 预加载字符串表和 PLT 表（反汇编 / 函数跳转识别都依赖它们）
@@ -418,6 +497,7 @@ public class MainActivity extends AppCompatActivity {
 
                 runOnUiThread(() -> {
                     showLoading(false);
+                    dismissLoadingDialog();
                     showSoInfo(soPath, soLoader.getBaseAddress(), functions.size());
                     // 保存原始URI用于最近项目重新加载
                     String originalUri = uri != null ? uri.toString() : "";
@@ -427,7 +507,18 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     showLoading(false);
-                    showError("错误: " + e.getMessage());
+                    dismissLoadingDialog();
+                    String msg = e.getMessage();
+                    if (msg != null && msg.contains("32 位 ARM")) {
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("不支持的文件")
+                                .setMessage(msg)
+                                .setPositiveButton("确定", null)
+                                .show();
+                        showError(msg);
+                    } else {
+                        showError("错误: " + msg);
+                    }
                 });
             }
         }).start();
@@ -472,6 +563,28 @@ public class MainActivity extends AppCompatActivity {
         binding.btnSelectSo.setEnabled(!show);
     }
 
+    private void showLoadingDialog(String message) {
+        if (loadingDialog != null && loadingDialog.isShowing()) {
+            TextView tv = loadingDialog.findViewById(R.id.tv_loading_message);
+            if (tv != null) tv.setText(message);
+            return;
+        }
+        View view = LayoutInflater.from(this).inflate(R.layout.dialog_loading, null);
+        TextView tv = view.findViewById(R.id.tv_loading_message);
+        if (tv != null) tv.setText(message);
+        loadingDialog = new AlertDialog.Builder(this)
+                .setView(view)
+                .setCancelable(false)
+                .create();
+        loadingDialog.show();
+    }
+
+    private void dismissLoadingDialog() {
+        if (loadingDialog != null && loadingDialog.isShowing()) {
+            loadingDialog.dismiss();
+        }
+    }
+
     private void showError(String msg) {
         binding.tvError.setVisibility(View.VISIBLE);
         binding.tvError.setText(msg);
@@ -493,7 +606,14 @@ public class MainActivity extends AppCompatActivity {
             Intent intent = new Intent(this, SettingsActivity.class);
             startActivity(intent);
             return true;
-        }
+        } else if (item.getItemId() == R.id.action_view_crash_log) {
+            if (CrashHandler.hasCrashLog(this)) {
+                startActivity(new Intent(this, CrashActivity.class));
+            } else {
+                Toast.makeText(this, "当前没有崩溃日志", Toast.LENGTH_SHORT).show();
+            }
+            return true;
+        } 
         return super.onOptionsItemSelected(item);
     }
 
@@ -584,6 +704,46 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private static final String CHANGELOG_VERSION = "1.4";
+    private static final String CHANGELOG_TEXT =
+            "• 新增导出当前页面功能（右上角菜单），汇编页导出 .asm，伪C页导出 .c\n" +
+            "• 导出文件自动保存至 /sdcard/SoSandbox/\n" +
+            "• 流程图改为本地运行，无需联网即可生成\n" +
+            "• 流程图已变为免费本地功能，不再依赖服务器\n" +
+            "• 修复部分手机选择文件时找不到 SO 文件的问题";
+
+    private void showChangelogIfNeeded() {
+        SharedPreferences prefs = getSharedPreferences("app_prefs", MODE_PRIVATE);
+        String lastShown = prefs.getString("last_changelog_version", "");
+        if (CHANGELOG_VERSION.equals(lastShown)) return;
+
+        new AlertDialog.Builder(this)
+                .setTitle("v" + CHANGELOG_VERSION + " 更新内容")
+                .setMessage(CHANGELOG_TEXT)
+                .setPositiveButton("知道了", (d, w) -> {
+                    prefs.edit().putString("last_changelog_version", CHANGELOG_VERSION).apply();
+                })
+                .setCancelable(false)
+                .show();
+    }
+
+    private void showCrashLogIfNeeded() {
+        if (!CrashHandler.hasCrashLog(this)) return;
+
+        String time = CrashHandler.getCrashTime(this);
+        new AlertDialog.Builder(this)
+                .setTitle("上次运行发生崩溃")
+                .setMessage("检测到上次于 " + time + " 发生了崩溃。\n\n可以查看崩溃日志并复制反馈。")
+                .setPositiveButton("查看日志", (d, w) -> {
+                    startActivity(new Intent(this, CrashActivity.class));
+                })
+                .setNegativeButton("清除记录", (d, w) -> {
+                    CrashHandler.clearCrashLog(this);
+                })
+                .setNeutralButton("暂不处理", null)
+                .show();
+    }
+
     @Override
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
@@ -665,5 +825,75 @@ public class MainActivity extends AppCompatActivity {
                 tvFunctions = v.findViewById(R.id.tv_functions);
             }
         }
+    }
+
+    private static final String UPDATE_URL = "https://api.github.com/repos/2452151196/So-Sandbox/releases/latest";
+
+    /**
+     * 启动时静默检测更新，有新版本才弹窗
+     */
+    private void checkForUpdateOnStart() {
+        SharedPreferences prefs = getSharedPreferences("update_prefs", MODE_PRIVATE);
+        long lastCheck = prefs.getLong("last_check_time", 0);
+        long now = System.currentTimeMillis();
+        // 每24小时最多检测一次
+        if (now - lastCheck < 24 * 60 * 60 * 1000L) return;
+
+        new Thread(() -> {
+            try {
+                java.net.URL url = new java.net.URL(UPDATE_URL);
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
+
+                java.io.BufferedReader reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(conn.getInputStream()));
+                StringBuilder response = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    response.append(line);
+                }
+                reader.close();
+
+                org.json.JSONObject json = new org.json.JSONObject(response.toString());
+                String latestVersion = json.getString("tag_name").replace("v", "");
+                String releaseUrl = json.getString("html_url");
+                String releaseNotes = json.optString("body", "");
+
+                String currentVersion = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+                boolean hasUpdate = compareVersions(latestVersion, currentVersion) > 0;
+
+                prefs.edit().putLong("last_check_time", now).apply();
+
+                if (hasUpdate) {
+                    runOnUiThread(() -> {
+                        new AlertDialog.Builder(this)
+                                .setTitle("发现新版本")
+                                .setMessage("当前版本：v" + currentVersion + "\n最新版本：v" + latestVersion + "\n\n" + releaseNotes)
+                                .setPositiveButton("前往更新", (d, w) -> {
+                                    Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(releaseUrl));
+                                    startActivity(browserIntent);
+                                })
+                                .setNegativeButton("以后再说", null)
+                                .show();
+                    });
+                }
+            } catch (Exception e) {
+                Log.w("MainActivity", "更新检测失败: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    private int compareVersions(String v1, String v2) {
+        String[] parts1 = v1.split("\\.");
+        String[] parts2 = v2.split("\\.");
+        int length = Math.max(parts1.length, parts2.length);
+        for (int i = 0; i < length; i++) {
+            int p1 = i < parts1.length ? Integer.parseInt(parts1[i]) : 0;
+            int p2 = i < parts2.length ? Integer.parseInt(parts2[i]) : 0;
+            if (p1 != p2) return p1 - p2;
+        }
+        return 0;
     }
 }

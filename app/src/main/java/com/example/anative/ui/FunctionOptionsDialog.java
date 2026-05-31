@@ -1,11 +1,13 @@
 package com.example.anative.ui;
 
+import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Intent;
 import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.List;
 
@@ -16,6 +18,7 @@ import androidx.fragment.app.DialogFragment;
 import com.example.anative.R;
 import com.example.anative.core.DataHolder;
 import com.example.anative.core.ElfParser;
+import com.example.anative.core.LicenseManager;
 import com.example.anative.core.NativeFunction;
 import com.example.anative.core.XRefScanner;
 import com.google.android.material.bottomsheet.BottomSheetDialog;
@@ -25,6 +28,8 @@ public class FunctionOptionsDialog extends DialogFragment {
 
     private NativeFunction function;
     private long baseAddress;
+
+    private LicenseManager licenseManager;
 
     public static FunctionOptionsDialog newInstance(NativeFunction func, long baseAddress) {
         FunctionOptionsDialog dialog = new FunctionOptionsDialog();
@@ -87,12 +92,12 @@ public class FunctionOptionsDialog extends DialogFragment {
 
         // 交叉引用分析
         btnXrefs.setOnClickListener(v -> {
-            new Thread(() -> {
-                XRefScanner scanner = ensureXRefScanner();
-                final List<XRefScanner.CallRef> callers = scanner.getCallersOf(function.getOffset());
-                final List<XRefScanner.CallRef> callees = scanner.getCalleesOf(function.getOffset());
+             new Thread(() -> {
+                 XRefScanner scanner = ensureXRefScanner();
+                 final List<XRefScanner.CallRef> callers = scanner.getCallersOf(function.getOffset());
+                 final List<XRefScanner.CallRef> callees = scanner.getCalleesOf(function.getOffset());
 
-                requireActivity().runOnUiThread(() -> {
+                 requireActivity().runOnUiThread(() -> {
                     dismiss();
                     XRefDialog xrefDialog = XRefDialog.newScannerInstance(function, callers, callees, baseAddress);
                     xrefDialog.show(getParentFragmentManager(), "xrefs");

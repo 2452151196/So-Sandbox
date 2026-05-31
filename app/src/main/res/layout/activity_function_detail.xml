@@ -37,4 +37,250 @@
         android:layout_height="0dp"
         android:layout_weight="1" />
 
+    <!-- 调试控制面板 -->
+    <LinearLayout
+        android:id="@+id/debugPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#FF1A1A2E"
+        android:visibility="gone"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="4dp"
+        android:elevation="4dp">
+
+        <!-- 状态行 + 折叠按钮 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp">
+
+            <View
+                android:id="@+id/dbgStatusDot"
+                android:layout_width="10dp"
+                android:layout_height="10dp"
+                android:layout_marginEnd="6dp"
+                android:background="@drawable/bp_dot" />
+
+            <TextView
+                android:id="@+id/tvDbgStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="调试未启动"
+                android:textColor="#FFCCCCCC"
+                android:textSize="12sp"
+                android:singleLine="true" />
+
+            <TextView
+                android:id="@+id/tvDbgPC"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="PC: --"
+                android:textColor="#FF80CBC4"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:layout_marginEnd="8dp" />
+
+            <TextView
+                android:id="@+id/btnDbgToggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="▼"
+                android:textColor="#FFCCCCCC"
+                android:textSize="16sp"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp" />
+        </LinearLayout>
+
+        <!-- 可折叠内容 -->
+        <LinearLayout
+            android:id="@+id/dbgExpandContent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="visible">
+
+            <!-- 偏移输入 + 下断点 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingTop="2dp"
+                android:paddingBottom="2dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="偏移:"
+                    android:textColor="#FFAAAAAA"
+                    android:textSize="12sp" />
+
+                <EditText
+                    android:id="@+id/etDbgOffset"
+                    android:layout_width="0dp"
+                    android:layout_height="32dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginEnd="4dp"
+                    android:background="#FF2A2A3E"
+                    android:hint="0x1234"
+                    android:textColorHint="#FF666666"
+                    android:textColor="#FFEEEEEE"
+                    android:textSize="12sp"
+                    android:fontFamily="monospace"
+                    android:paddingStart="6dp"
+                    android:paddingEnd="6dp"
+                    android:inputType="text"
+                    android:singleLine="true" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDbgSetBp"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:text="断点"
+                    android:textSize="11sp"
+                    android:textColor="#FFEF5350"
+                    android:minWidth="48dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp" />
+            </LinearLayout>
+
+            <!-- 控制按钮行 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingTop="2dp"
+                android:paddingBottom="2dp">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDbgSpawn"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:text="启动"
+                    android:textSize="12sp"
+                    android:textColor="#FF4CAF50"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDbgCall"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:text="调用"
+                    android:textSize="12sp"
+                    android:textColor="#FFFFAB40"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDbgContinue"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:text="继续"
+                    android:textSize="12sp"
+                    android:textColor="#FF42A5F5"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDbgStep"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:text="单步"
+                    android:textSize="12sp"
+                    android:textColor="#FF7E57C2"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDbgDetach"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:text="分离"
+                    android:textSize="12sp"
+                    android:textColor="#FFEF5350"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp" />
+            </LinearLayout>
+
+            <!-- 断点列表 -->
+            <TextView
+                android:id="@+id/tvDbgBreakpoints"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="断点: 无"
+                android:textColor="#FF999999"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:paddingTop="2dp"
+                android:paddingBottom="4dp"
+                android:maxLines="3" />
+
+            <!-- 寄存器显示 -->
+            <LinearLayout
+                android:id="@+id/regHeader"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingTop="2dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="寄存器"
+                    android:textColor="#FF80CBC4"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btnRefreshRegs"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="刷新"
+                    android:textColor="#FF42A5F5"
+                    android:textSize="11sp"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp" />
+            </LinearLayout>
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:maxHeight="120dp"
+                android:paddingBottom="4dp">
+
+                <TextView
+                    android:id="@+id/tvDbgRegisters"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="(未读取)"
+                    android:textColor="#FFBBBBBB"
+                    android:textSize="10sp"
+                    android:fontFamily="monospace"
+                    android:lineSpacingExtra="1dp" />
+            </ScrollView>
+        </LinearLayout>
+    </LinearLayout>
+
 </LinearLayout>

@@ -216,6 +216,7 @@ public class HexFragment extends Fragment {
                                             modified[index] = (newByte != oldVal);
                                             adapter.notifyItemChanged(row);
                                             tvEditInfo.setText(String.format("已写入: 0x%X = %02X", addr, newVal));
+                                            DataHolder.getInstance().markFileModified();
                                             if (refreshListener != null) refreshListener.onRefresh();
                                         });
                                     } catch (Exception ex) {

@@ -118,6 +118,13 @@ public class PseudoCFragment extends Fragment {
         loadPseudoC();
     }
 
+    public String getAllCode() {
+        if (tvCode != null) {
+            return tvCode.getText().toString();
+        }
+        return null;
+    }
+
     private void loadPseudoC() {
         progressBar.setVisibility(View.VISIBLE);
         tvCode.setText("");
@@ -186,6 +193,13 @@ public class PseudoCFragment extends Fragment {
         String asm = buildAssemblyForAi();
         if (asm == null || asm.trim().isEmpty() || asm.startsWith("ERR:")) {
             return asm == null || asm.isEmpty() ? "ERR: 汇编为空" : asm;
+        }
+
+        // 汇编过长（超过约2000条指令），AI 处理效果差且浪费 token
+        final int MAX_ASM_LENGTH = 8000;
+        if (asm.length() > MAX_ASM_LENGTH) {
+            return "ERR: 函数过大（" + asm.length() + " 字符），超出 AI 处理限制（" + MAX_ASM_LENGTH + " 字符）\n"
+                    + "建议使用更精确的函数发现模式或手动缩小函数范围";
         }
 
         String prompt = buildAiPrompt(name, asm);

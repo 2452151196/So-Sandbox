@@ -8,4 +8,9 @@
         android:icon="@drawable/ic_settings"
         app:showAsAction="always" />
 
+    <item
+        android:id="@+id/action_view_crash_log"
+        android:title="查看最近崩溃日志"
+        app:showAsAction="never" />
+
 </menu>

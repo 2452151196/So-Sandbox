@@ -49,9 +49,15 @@ add_library(
         invoker.c
         crash_protection.c
         decompiler.c
-        runtime_tracer.cpp)
+        runtime_tracer.cpp
+        native-lib.cpp
+        tiny_aes.cpp
+        debugger.cpp)
 
 target_include_directories(so_sandbox PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/capstone/include)
+
+# 添加 mbedTLS 子目录
+add_subdirectory(mbedtls)
 
 # 查找Android系统库
 find_library(log-lib log)
@@ -60,6 +66,7 @@ find_library(dl-lib dl)
 target_link_libraries(
         so_sandbox
         capstone
+        mbedcrypto
         ${log-lib}
         ${dl-lib}
         -latomic

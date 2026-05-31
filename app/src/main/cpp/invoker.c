@@ -22,7 +22,17 @@
 
 #define TAG "NativeInvoker"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+// 平台检测：动态执行仅在 ARM64 真机支持
+#if defined(__aarch64__) || defined(__arm64__)
+    #define PLATFORM_SUPPORTS_EXECUTION 1
+    #define PLATFORM_NAME "ARM64"
+#else
+    #define PLATFORM_SUPPORTS_EXECUTION 0
+    #define PLATFORM_NAME "X86/Other"
+#endif
 
 // 全局JNI上下文 (用于注入给被调用的JNI函数)
 static JavaVM *g_jvm = NULL;
@@ -449,6 +459,10 @@ Java_com_example_anative_core_NativeInvoker_invokeFunction(
         jlong funcAddr, jstring jRetType,
         jobjectArray jParamTypes, jobjectArray jParamValues) {
 
+#if !PLATFORM_SUPPORTS_EXECUTION
+    return (*env)->NewStringUTF(env, "ERR: 动态函数执行仅在 ARM64 真机支持，当前平台 (" PLATFORM_NAME ") 仅支持静态分析");
+#endif
+
     static int ffi_loaded = 0;
     if (!ffi_loaded) {
         try_load_libffi();
@@ -854,15 +868,53 @@ Java_com_example_anative_core_NativeInvoker_disassembleFunctionEx(
         return (*env)->NewStringUTF(env, "ERR: Capstone初始化失败");
     }
     cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+    cs_option(handle, CS_OPT_SKIPDATA, CS_OPT_ON);
 
     cs_insn *insns = NULL;
     size_t count = cs_disasm(handle, code_copy, size, (uint64_t)funcAddr, 0, &insns);
-    free(code_copy);
 
     if (count <= 0) {
+        // 反汇编完全失败，直接显示原始字节
+        size_t raw_buf_size = size * 32 + 4096;
+        char *raw_buffer = (char *)calloc(1, raw_buf_size);
+        if (!raw_buffer) {
+            free(code_copy);
+            cs_close(&handle);
+            return (*env)->NewStringUTF(env, "ERR: out of memory");
+        }
+        int rpos = 0;
+        uint64_t funcOffset_raw = (uint64_t)funcAddr - base;
+        rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                        "; ARM64 Disassembly - 解析失败，显示原始字节\n"
+                        "; Function Offset: 0x%llx, Size: %zu bytes\n\n",
+                        (unsigned long long)funcOffset_raw, size);
+        for (size_t off = 0; off + 3 < size; off += 4) {
+            uint32_t word = *(uint32_t *)(code_copy + off);
+            rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                            "%08llx:  .inst   0x%08x  ; %02x %02x %02x %02x\n",
+                            (unsigned long long)(funcOffset_raw + off), word,
+                            code_copy[off], code_copy[off+1], code_copy[off+2], code_copy[off+3]);
+        }
+        // 处理末尾不足4字节的情况
+        size_t tail = size % 4;
+        if (tail > 0) {
+            size_t tail_off = size - tail;
+            rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                            "%08llx:  .byte  ",
+                            (unsigned long long)(funcOffset_raw + tail_off));
+            for (size_t t = 0; t < tail; t++) {
+                rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                                "%s0x%02x", t > 0 ? ", " : "", code_copy[tail_off + t]);
+            }
+            rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos, "\n");
+        }
+        free(code_copy);
         cs_close(&handle);
-        return (*env)->NewStringUTF(env, "ERR: 反汇编失败，无有效指令");
+        jstring result_str = (*env)->NewStringUTF(env, raw_buffer);
+        free(raw_buffer);
+        return result_str;
     }
+    free(code_copy);
 
     // 格式化输出
     size_t buf_size = count * 256 + 4096;  // 增加缓冲区用于注释
@@ -1137,16 +1189,52 @@ Java_com_example_anative_core_NativeInvoker_disassembleBytes(
         return (*env)->NewStringUTF(env, "ERR: Capstone初始化失败");
     }
     cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+    cs_option(handle, CS_OPT_SKIPDATA, CS_OPT_ON);
 
     cs_insn *insns = NULL;
     // 使用偏移地址作为基址，这样Capstone计算的跳转目标也是偏移
     size_t count = cs_disasm(handle, code, size, (uint64_t)funcOffset, 0, &insns);
-    free(code);
 
     if (count <= 0) {
+        // 反汇编完全失败，直接显示原始字节
+        size_t raw_buf_size = size * 32 + 4096;
+        char *raw_buffer = (char *)calloc(1, raw_buf_size);
+        if (!raw_buffer) {
+            free(code);
+            cs_close(&handle);
+            return (*env)->NewStringUTF(env, "ERR: out of memory");
+        }
+        int rpos = 0;
+        rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                        "; ARM64 Disassembly - 解析失败，显示原始字节\n"
+                        "; Function Offset: 0x%llx, Size: %zu bytes\n\n",
+                        (unsigned long long)funcOffset, size);
+        for (size_t off = 0; off + 3 < size; off += 4) {
+            uint32_t word = *(uint32_t *)(code + off);
+            rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                            "%08llx:  .inst   0x%08x  ; %02x %02x %02x %02x\n",
+                            (unsigned long long)(funcOffset + off), word,
+                            code[off], code[off+1], code[off+2], code[off+3]);
+        }
+        size_t tail = size % 4;
+        if (tail > 0) {
+            size_t tail_off = size - tail;
+            rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                            "%08llx:  .byte  ",
+                            (unsigned long long)(funcOffset + tail_off));
+            for (size_t t = 0; t < tail; t++) {
+                rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                                "%s0x%02x", t > 0 ? ", " : "", code[tail_off + t]);
+            }
+            rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos, "\n");
+        }
+        free(code);
         cs_close(&handle);
-        return (*env)->NewStringUTF(env, "ERR: 反汇编失败，无有效指令");
+        jstring result_str = (*env)->NewStringUTF(env, raw_buffer);
+        free(raw_buffer);
+        return result_str;
     }
+    free(code);
 
     size_t buf_size = count * 256 + 4096;
     char *buffer = (char *)calloc(1, buf_size);
@@ -1513,18 +1601,27 @@ JNIEXPORT jlong JNICALL
 Java_com_example_anative_core_NativeInvoker_nativeDlopen(
         JNIEnv *env, jclass clazz, jstring jpath) {
 
+#if !PLATFORM_SUPPORTS_EXECUTION
+    return 0; // 非ARM64平台不支持动态加载
+#endif
+
     const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
     if (!path) return 0;
 
     LOGI("dlopen: %s", path);
 
     // RTLD_NOW: 立即解析所有符号
+    // RTLD_LAZY: 延迟解析，可能解决静态链接SO的问题
     // 不用 RTLD_GLOBAL 防止符号污染
     void *handle = dlopen(path, RTLD_NOW);
     if (!handle) {
-        LOGE("dlopen failed: %s", dlerror());
-        (*env)->ReleaseStringUTFChars(env, jpath, path);
-        return 0;
+        LOGW("RTLD_NOW failed, trying RTLD_LAZY...");
+        handle = dlopen(path, RTLD_LAZY);
+        if (!handle) {
+            LOGE("dlopen failed: %s", dlerror());
+            (*env)->ReleaseStringUTFChars(env, jpath, path);
+            return 0;
+        }
     }
 
     LOGI("dlopen success, handle=%p", handle);
@@ -1541,10 +1638,12 @@ JNIEXPORT void JNICALL
 Java_com_example_anative_core_NativeInvoker_nativeDlclose(
         JNIEnv *env, jclass clazz, jlong handle) {
 
+#if PLATFORM_SUPPORTS_EXECUTION
     if (handle != 0) {
         dlclose((void *)(uintptr_t)handle);
         LOGI("dlclose: handle=%p", (void *)(uintptr_t)handle);
     }
+#endif
 }
 
 // ============================================================================
@@ -1554,6 +1653,10 @@ Java_com_example_anative_core_NativeInvoker_nativeDlclose(
 JNIEXPORT jlong JNICALL
 Java_com_example_anative_core_NativeInvoker_nativeDlsym(
         JNIEnv *env, jclass clazz, jlong handle, jstring jsym) {
+
+#if !PLATFORM_SUPPORTS_EXECUTION
+    return 0; // 非ARM64平台不支持
+#endif
 
     if (handle == 0) return 0;
 
@@ -1581,8 +1684,13 @@ Java_com_example_anative_core_NativeInvoker_disassembleTextSection(
     uint64_t hlStart = (uint64_t)highlightFuncAddr;
     uint64_t hlEnd = hlStart + (uint64_t)highlightFuncSize;
 
-    if (size == 0 || size > 16 * 1024 * 1024) { // 最大16MB
+    // 限制TEXT段反汇编大小，防止大文件卡死（最大512KB，约几万条指令）
+    const size_t MAX_TEXT_DISASM_SIZE = 512 * 1024;
+    if (size == 0 || size > 16 * 1024 * 1024) {
         return (*env)->NewStringUTF(env, "ERR: invalid text size");
+    }
+    if (size > MAX_TEXT_DISASM_SIZE) {
+        size = MAX_TEXT_DISASM_SIZE;
     }
 
     // 解析字符串表和PLT表
@@ -1618,15 +1726,38 @@ Java_com_example_anative_core_NativeInvoker_disassembleTextSection(
         return (*env)->NewStringUTF(env, "ERR: Capstone初始化失败");
     }
     cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+    cs_option(handle, CS_OPT_SKIPDATA, CS_OPT_ON);
 
     cs_insn *insns = NULL;
     size_t count = cs_disasm(handle, code_copy, size, base, 0, &insns);
-    free(code_copy);
 
     if (count <= 0) {
+        // TEXT段反汇编完全失败，显示原始字节
+        size_t raw_buf_size = (size / 4) * 48 + 4096;
+        if (raw_buf_size > 4 * 1024 * 1024) raw_buf_size = 4 * 1024 * 1024;
+        char *raw_buffer = (char *)calloc(1, raw_buf_size);
+        if (!raw_buffer) {
+            free(code_copy);
+            cs_close(&handle);
+            return (*env)->NewStringUTF(env, "ERR: out of memory");
+        }
+        int rpos = 0;
+        rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                        "; TEXT Disassembly - 解析失败，显示原始字节\n\n");
+        for (size_t off = 0; off + 3 < size && rpos < (int)raw_buf_size - 128; off += 4) {
+            uint32_t word = *(uint32_t *)(code_copy + off);
+            rpos += snprintf(raw_buffer + rpos, raw_buf_size - rpos,
+                            "%08llx:  .inst   0x%08x  ; %02x %02x %02x %02x\n",
+                            (unsigned long long)(base + off), word,
+                            code_copy[off], code_copy[off+1], code_copy[off+2], code_copy[off+3]);
+        }
+        free(code_copy);
         cs_close(&handle);
-        return (*env)->NewStringUTF(env, "ERR: TEXT段反汇编失败");
+        jstring result_str = (*env)->NewStringUTF(env, raw_buffer);
+        free(raw_buffer);
+        return result_str;
     }
+    free(code_copy);
 
     // 分配足够大的缓冲区
     size_t buf_size = count * 256 + 8192;

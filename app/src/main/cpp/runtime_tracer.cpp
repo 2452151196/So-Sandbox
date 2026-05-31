@@ -375,13 +375,17 @@ JNIEXPORT jstring JNICALL
 Java_com_example_anative_core_NativeInvoker_readLRRegister(
     JNIEnv* env,
     jclass clazz) {
-    
+
+#if !defined(__aarch64__) && !defined(__arm64__)
+    return env->NewStringUTF("LR: 不支持 (仅 ARM64)");
+#endif
+
     void* lr;
     __asm__ volatile("mov %0, x30" : "=r"(lr));
-    
+
     char buf[256];
     snprintf(buf, sizeof(buf), "LR: %p", lr);
-    
+
     return env->NewStringUTF(buf);
 }
 
@@ -396,7 +400,12 @@ Java_com_example_anative_core_NativeInvoker_enableTraceForFunction(
     jclass clazz,
     jlong funcAddr,
     jstring jFuncName) {
-    
+
+#if !defined(__aarch64__) && !defined(__arm64__)
+    LOGI("运行时追踪仅在 ARM64 平台支持");
+    return JNI_FALSE;
+#endif
+
     const char* funcName = env->GetStringUTFChars(jFuncName, nullptr);
     
     // 清理之前的追踪
@@ -546,7 +555,11 @@ Java_com_example_anative_core_NativeInvoker_invokeWithTrace(
     jint arg1,
     jint arg2,
     jlong baseAddr) {
-    
+
+#if !defined(__aarch64__) && !defined(__arm64__)
+    return env->NewStringUTF("ERR: 带追踪的函数调用仅在 ARM64 平台支持");
+#endif
+
     typedef int (*FuncType)(int, int);
     FuncType targetFunc = (FuncType)(uintptr_t)funcAddr;
     

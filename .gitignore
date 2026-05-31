@@ -27,3 +27,13 @@ keystore.properties
 
 # OS
 Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Large binary files
+*.tar.gz
+
+# Data files
+cloud/server_data.json

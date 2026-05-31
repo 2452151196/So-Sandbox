@@ -6,6 +6,10 @@ import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.webkit.WebChromeClient;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.ProgressBar;
 
@@ -13,6 +17,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 
+import android.util.Log;
 import com.example.anative.R;
 import com.example.anative.core.DataHolder;
 import com.example.anative.core.ElfParser;
@@ -27,6 +32,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.Arrays;
 
 public class FlowChartFragment extends Fragment {
 
@@ -37,27 +43,32 @@ public class FlowChartFragment extends Fragment {
     private long funcSize;
     private long baseAddress;
 
-    private FlowChartView chartView;
+    private WebView webView;
+    private FlowChartView fallbackView;
     private ProgressBar progressBar;
+    private boolean pageReady = false;
+    private String pendingJson = null;
+    private boolean webViewAvailable = false;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler handler = new Handler(Looper.getMainLooper());
 
-    // 跳转指令集合
-    private static final Set<String> BRANCH_INSNS = new HashSet<>();
-    static {
-        String[] b = {"b", "bl", "br", "blr", "ret", "cbz", "cbnz", "tbz", "tbnz",
-                "b.eq", "b.ne", "b.cs", "b.hs", "b.cc", "b.lo", "b.mi", "b.pl",
-                "b.vs", "b.vc", "b.hi", "b.ls", "b.ge", "b.lt", "b.gt", "b.le", "b.al"};
-        for (String s : b) BRANCH_INSNS.add(s);
-    }
-    private static final Set<String> COND_BRANCH_INSNS = new HashSet<>();
-    static {
-        String[] c = {"cbz", "cbnz", "tbz", "tbnz",
-                "b.eq", "b.ne", "b.cs", "b.hs", "b.cc", "b.lo", "b.mi", "b.pl",
-                "b.vs", "b.vc", "b.hi", "b.ls", "b.ge", "b.lt", "b.gt", "b.le", "b.al"};
-        for (String s : c) COND_BRANCH_INSNS.add(s);
-    }
+    // 跳转指令集合（本地硬编码，无需服务端）
+    private final Set<String> BRANCH_INSNS = new HashSet<>(Arrays.asList(
+            "b", "bl", "br", "blr", "ret",
+            "cbz", "cbnz", "tbz", "tbnz",
+            "b.eq", "b.ne", "b.cs", "b.hs",
+            "b.cc", "b.lo", "b.mi", "b.pl",
+            "b.vs", "b.vc", "b.hi", "b.ls",
+            "b.ge", "b.lt", "b.gt", "b.le", "b.al"
+    ));
+    private final Set<String> COND_BRANCH_INSNS = new HashSet<>(Arrays.asList(
+            "cbz", "cbnz", "tbz", "tbnz",
+            "b.eq", "b.ne", "b.cs", "b.hs",
+            "b.cc", "b.lo", "b.mi", "b.pl",
+            "b.vs", "b.vc", "b.hi", "b.ls",
+            "b.ge", "b.lt", "b.gt", "b.le", "b.al"
+    ));
 
     public static FlowChartFragment newInstance(long funcAddr, long funcSize) {
         FlowChartFragment fragment = new FlowChartFragment();
@@ -85,9 +96,46 @@ public class FlowChartFragment extends Fragment {
         FrameLayout root = new FrameLayout(requireContext());
         root.setBackgroundColor(androidx.core.content.ContextCompat.getColor(requireContext(), R.color.chart_bg));
 
-        chartView = new FlowChartView(requireContext());
-        root.addView(chartView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        try {
+            webView = new WebView(requireContext());
+            WebSettings ws = webView.getSettings();
+            ws.setJavaScriptEnabled(true);
+            ws.setDomStorageEnabled(true);
+            webView.setWebChromeClient(new WebChromeClient());
+            webView.setWebViewClient(new WebViewClient() {
+                @Override
+                public void onPageFinished(WebView view, String url) {
+                    pageReady = true;
+                    if (pendingJson != null) {
+                        callSetGraph(pendingJson);
+                        pendingJson = null;
+                    }
+                }
+            });
+            webView.loadUrl("file:///android_asset/flowchart.html");
+            webView.setOnTouchListener((v, event) -> {
+                switch (event.getActionMasked()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                    case android.view.MotionEvent.ACTION_POINTER_DOWN:
+                        v.getParent().requestDisallowInterceptTouchEvent(true);
+                        break;
+                    case android.view.MotionEvent.ACTION_UP:
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        v.getParent().requestDisallowInterceptTouchEvent(false);
+                        break;
+                }
+                return false;
+            });
+            root.addView(webView, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            webViewAvailable = true;
+        } catch (Throwable e) {
+            // WebView 初始化失败（比如模拟器或 hook 冲突），降级到 Canvas 渲染
+            webViewAvailable = false;
+            fallbackView = new FlowChartView(requireContext());
+            root.addView(fallbackView, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
 
         progressBar = new ProgressBar(requireContext());
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
@@ -109,12 +157,41 @@ public class FlowChartFragment extends Fragment {
         progressBar.setVisibility(View.VISIBLE);
 
         executor.execute(() -> {
+            // 本地生成流程图（无需服务端）
             String asmCode = getDisassembly();
+            if (asmCode == null || asmCode.isEmpty()) {
+                handler.post(() -> {
+                    if (!isAdded()) return;
+                    progressBar.setVisibility(View.GONE);
+                    android.widget.Toast.makeText(requireContext(),
+                            "反汇编失败，无法生成流程图",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                });
+                return;
+            }
+
             List<FlowChartView.BasicBlock> blocks = parseBlocks(asmCode);
+            String json = blocksToJson(blocks);
+            Log.d("FlowChart", "Local flowchart generated: " + blocks.size() + " blocks, json length=" + json.length());
 
             handler.post(() -> {
+                if (!isAdded()) return;
                 progressBar.setVisibility(View.GONE);
-                chartView.setBlocks(blocks);
+                if (blocks.isEmpty()) {
+                    android.widget.Toast.makeText(requireContext(),
+                            "流程图生成失败：无基本块",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                if (webViewAvailable) {
+                    if (pageReady) {
+                        callSetGraph(json);
+                    } else {
+                        pendingJson = json;
+                    }
+                } else if (fallbackView != null) {
+                    fallbackView.setBlocks(blocks);
+                }
             });
         });
     }
@@ -333,9 +410,49 @@ public class FlowChartFragment extends Fragment {
         return sb.toString();
     }
 
+    private void callSetGraph(String json) {
+        if (webView == null || !isAdded()) return;
+        boolean isDark = (requireContext().getResources().getConfiguration().uiMode
+                & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        // JSON字符串需要用单引号包裹，避免JavaScript语法错误
+        String escapedJson = json.replace("\\", "\\\\").replace("'", "\\'");
+        webView.evaluateJavascript(
+                "window.setDarkMode(" + isDark + ");window.setGraph(JSON.parse('" + escapedJson + "'))", null);
+    }
+
+    private String blocksToJson(List<FlowChartView.BasicBlock> blocks) {
+        StringBuilder sb = new StringBuilder("{\"blocks\":[");
+        for (int i = 0; i < blocks.size(); i++) {
+            FlowChartView.BasicBlock b = blocks.get(i);
+            if (i > 0) sb.append(',');
+            sb.append("{\"label\":\"").append(jsonEsc(b.label)).append("\",");
+            sb.append("\"isConditional\":").append(b.isConditional).append(',');
+            sb.append("\"successors\":[");
+            for (int j = 0; j < b.successors.size(); j++) {
+                if (j > 0) sb.append(',');
+                sb.append(b.successors.get(j));
+            }
+            sb.append("],\"instructions\":[");
+            for (int j = 0; j < b.instructions.size(); j++) {
+                if (j > 0) sb.append(',');
+                sb.append('"').append(jsonEsc(b.instructions.get(j))).append('"');
+            }
+            sb.append("]}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private String jsonEsc(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
     @Override
     public void onDestroy() {
         super.onDestroy();
         executor.shutdown();
+        if (webView != null) { webView.destroy(); webView = null; }
     }
 }

@@ -381,7 +381,15 @@ public class TextFragment extends Fragment {
     private void formatDataSection(StringBuilder sb, ElfParser.SectionInfo sec, byte[] data, Map<Long, String> funcMap) {
         long addr = sec.virtualAddress;
         int i = 0;
-        while (i < data.length) {
+        final int MAX_OUTPUT_LINES = 500; // 限制输出行数
+        int outputLines = 0;
+        
+        while (i < data.length && outputLines < MAX_OUTPUT_LINES) {
+            // 每处理1000字节检查一次是否超时（防止UI线程卡死）
+            if (i % 1000 == 0) {
+                Thread.yield();
+            }
+            
             // Try to find a string
             int strStart = i;
             while (i < data.length && data[i] >= 0x20 && data[i] < 0x7F) i++;
@@ -393,6 +401,7 @@ public class TextFragment extends Fragment {
                 sb.append(fmtAddr(sec.name, addr + strStart))
                         .append(String.format(" %-16s DCB \"%s\",0\n", label, escapeStr(str)));
                 i++; // skip null terminator
+                outputLines++;
             } else if (i == strStart) {
                 // Not a printable char, show hex bytes (group up to 16)
                 int hexStart = i;
@@ -413,6 +422,7 @@ public class TextFragment extends Fragment {
                     }
                     sb.append(fmtAddr(sec.name, addr + hexStart))
                             .append("                 DCB ").append(hex).append("\n");
+                    outputLines++;
                 }
             } else {
                 // Short non-string printable sequence, show as hex
@@ -423,7 +433,14 @@ public class TextFragment extends Fragment {
                 }
                 sb.append(fmtAddr(sec.name, addr + strStart))
                         .append("                 DCB ").append(hex).append("\n");
+                outputLines++;
             }
+        }
+        
+        // 如果数据被截断，添加提示
+        if (i < data.length) {
+            sb.append(fmtAddr(sec.name, addr + i))
+                    .append(String.format("                 ; ... (%d bytes remaining, truncated)\n", data.length - i));
         }
     }
 

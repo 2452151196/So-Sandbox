@@ -1,21 +1,44 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# =============================
+# SoSandbox release 混淆规则
+# =============================
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# 混淆字典配置（实验性）
+-obfuscationdictionary proguard-dic.txt
+-classobfuscationdictionary proguard-dic.txt
+-packageobfuscationdictionary proguard-dic.txt
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# 保留调试映射需要的行号信息（便于用 mapping.txt 还原崩溃）
+-keepattributes SourceFile,LineNumberTable
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# JNI 关键规则：凡是包含 native 方法的类及方法名都不要改名
+# 否则会导致 Java_xxx 符号找不到
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+
+# 保留 NativeInvoker（大量 JNI 入口集中在这里）
+-keep class com.example.anative.core.NativeInvoker { *; }
+
+# 保留包含 JNI 方法的 UI 类（当前有 native 声明）
+-keep class com.example.anative.ui.RegisterNativesActivity { *; }
+-keep class com.example.anative.ui.FlowChartFragment { *; }
+
+# 保留 enum 的 values/valueOf（防止被错误裁剪）
+-keepclassmembers enum * {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}
+
+# StringFog 运行时解密类必须保留，否则字符串解密崩溃
+# 插件自动生成的 StringFog 类在 app 包名下
+-keep class com.example.anative.StringFog { *; }
+-keep class com.github.megatronking.stringfog.xor.StringFogImpl { *; }
+-keep class com.github.megatronking.stringfog.IStringFog { *; }
+-keepclassmembers class com.example.anative.StringFog {
+    public static *** decrypt(...);
+}
+
+# 忽略一些常见库告警，避免 release 构建被无关 warning 阻断
+-dontwarn org.conscrypt.**
+-dontwarn javax.annotation.**
+-dontwarn com.github.megatronking.stringfog.**

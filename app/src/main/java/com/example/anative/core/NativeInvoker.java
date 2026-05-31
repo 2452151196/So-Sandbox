@@ -32,6 +32,11 @@ public class NativeInvoker {
     public static native boolean hookRegisterNatives();
 
     /**
+     * 卸载 RegisterNatives Hook，恢复原始函数表，WebView 等库可正常使用
+     */
+    public static native void unhookRegisterNatives();
+
+    /**
      * Hook FindClass/GetMethodID/GetFieldID (让第三方SO的JNI调用不崩溃)
      */
     public static native boolean hookFindClass();
@@ -65,9 +70,12 @@ public class NativeInvoker {
     /**
      * 调用目标SO的JNI_OnLoad，触发RegisterNatives捕获
      * @param handle dlopen句柄
+     * @param encSymbol 云端加密的JNI_OnLoad字符串
+     * @param encMaxCapture 云端加密的MAX_CAPTURED大小
+     * @param encPageSize 云端加密的page_size
      * @return "OK:version|count" 或 "ERR:msg" 或 "CRASH:signal|count"
      */
-    public static native String callJniOnLoad(long handle);
+    public static native String callJniOnLoad(long handle, String encSymbol, String encMaxCapture, String encPageSize);
 
     /**
      * 调用捕获到的动态注册函数

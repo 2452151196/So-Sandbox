@@ -21,6 +21,7 @@
         tools:ignore="ScopedStorage" />
 
     <application
+        android:name=".HookApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -29,8 +30,14 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Native"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:requestLegacyExternalStorage="true"
         tools:targetApi="31">
+        <activity
+            android:name=".ui.CrashActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Native"
+            android:screenOrientation="portrait" />
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
@@ -39,6 +46,36 @@
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 支持从文件管理器打开 SO 文件 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/x-sharedlib" />
+                <data android:mimeType="application/x-executable" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:pathPattern=".*\\.so" />
+                <data android:pathPattern=".*\\.elf" />
+            </intent-filter>
+
+            <!-- 支持通过 SEND 分享 SO 文件到本应用 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/x-sharedlib" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!-- 支持通过 SEND_MULTIPLE 分享多个文件 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/x-sharedlib" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
         <activity
@@ -62,6 +99,9 @@
         <activity
             android:name=".ui.SettingsActivity"
             android:parentActivityName=".ui.MainActivity" />
+        <activity
+            android:name=".ui.DebuggerActivity"
+            android:parentActivityName=".ui.FunctionDetailActivity" />
 
         <!-- FileProvider for sharing files via content:// URI -->
         <provider

@@ -1,14 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
-<TextView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/tvLine"
-    android:layout_width="match_parent"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
     android:layout_height="wrap_content"
-    android:paddingStart="12dp"
-    android:paddingEnd="12dp"
-    android:textSize="13sp"
-    android:textColor="@color/code_text"
-    android:fontFamily="monospace"
-    android:singleLine="true"
-    android:ellipsize="none"
-    android:scrollHorizontally="true"
-    android:background="@android:color/transparent" />
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:background="@android:color/transparent">
+
+    <View
+        android:id="@+id/viewBpIndicator"
+        android:layout_width="8dp"
+        android:layout_height="8dp"
+        android:layout_marginStart="2dp"
+        android:layout_marginEnd="2dp"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/tvLine"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:paddingEnd="12dp"
+        android:textSize="13sp"
+        android:textColor="@color/code_text"
+        android:fontFamily="monospace"
+        android:singleLine="true"
+        android:ellipsize="none"
+        android:background="@android:color/transparent" />
+
+</LinearLayout>

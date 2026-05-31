@@ -109,7 +109,7 @@
             android:id="@+id/et_dialog_ai_url"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="AI API 网址"
+            android:hint="API 完整地址（例：https://api.openai.com/v1/chat/completions）"
             android:textColor="@color/text_primary"
             android:textColorHint="@color/text_secondary"
             android:inputType="textUri"
@@ -135,7 +135,7 @@
             android:id="@+id/et_dialog_ai_template"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="请求模板（高级）"
+            android:hint="请求模板：完整 JSON 请求体。占位符 {{url}} {{key}} {{prompt_raw}}（对象body）/{{prompt}}（字符串body）"
             android:textColor="@color/text_primary"
             android:textColorHint="@color/text_secondary"
             android:inputType="textMultiLine"
@@ -163,7 +163,7 @@
             android:id="@+id/et_dialog_ai_response_path"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="响应解析路径（可选）"
+            android:hint="响应解析路径（可选）：如 choices[0].message.content，留空自动识别"
             android:textColor="@color/text_primary"
             android:textColorHint="@color/text_secondary"
             android:inputType="text"
@@ -176,7 +176,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
-        android:text='解析路径可留空自动识别。占位符: {{url}} {{key}} {{prompt}} {{prompt_raw}}\n用法: body是对象时用 {{prompt_raw}}；body是字符串JSON时用 {{prompt}}。'
+        android:text="高级模式说明：\n• API 网址：填写完整的请求地址\n• 请求模板：完整的 JSON 请求体。占位符 {{url}}、{{key}}、{{prompt_raw}}（body为对象时使用）、{{prompt}}（body为字符串JSON时使用）\n• 响应解析路径：从返回 JSON 中提取答案的路径，如 choices[0].message.content，留空则自动识别 OpenAI/Gemini 格式。"
         android:textColor="@color/text_secondary"
         android:textSize="12sp" />
 

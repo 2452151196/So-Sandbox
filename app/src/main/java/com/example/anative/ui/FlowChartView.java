@@ -51,6 +51,8 @@ public class FlowChartView extends View {
         boolean isBackEdge;
         boolean routeOnLeft;
         int routeLane;
+        int entryIndex, entryTotal;
+        int exitIndex, exitTotal;
     }
 
     private final List<BasicBlock> blocks = new ArrayList<>();
@@ -67,6 +69,7 @@ public class FlowChartView extends View {
     private final Paint instrPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint shadowPaint = new Paint();
+    private final Paint separatorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private float scale = 1.0f;
     private float translateX = 0, translateY = 0;
@@ -79,8 +82,8 @@ public class FlowChartView extends View {
     private static final float HEADER_SIZE = 24f;
     private static final float PAD = 14f;
     private static final float LINE_H = 28f;
-    private static final float V_GAP = 80f;
-    private static final float H_GAP = 40f;
+    private static final float V_GAP = 110f;
+    private static final float H_GAP = 60f;
     private static final float CORNER_R = 8f;
     private static final float MIN_W = 200f;
     private static final float ARC_R = 10f;
@@ -101,6 +104,7 @@ public class FlowChartView extends View {
         headerPaint.setColor(resColor(ctx, R.color.chart_header_bg)); headerPaint.setStyle(Paint.Style.FILL);
         borderPaint.setColor(resColor(ctx, R.color.chart_border)); borderPaint.setStyle(Paint.Style.STROKE); borderPaint.setStrokeWidth(1.5f);
         shadowPaint.setColor(resColor(ctx, R.color.chart_shadow)); shadowPaint.setStyle(Paint.Style.FILL);
+        separatorPaint.setColor(resColor(ctx, R.color.chart_border)); separatorPaint.setStyle(Paint.Style.STROKE); separatorPaint.setStrokeWidth(1f);
 
         textPaint.setColor(resColor(ctx, R.color.chart_text)); textPaint.setTextSize(TEXT_SIZE);
         textPaint.setTypeface(android.graphics.Typeface.MONOSPACE);
@@ -274,6 +278,20 @@ public class FlowChartView extends View {
                 e.routeLane = rightLaneCount++;
             }
         }
+
+        // 为入/出口分配索引，使多条边错位不重叠
+        int[] entryCountArr = new int[n];
+        for (Edge e : edges) entryCountArr[e.to]++;
+        int[] exitCountArr = new int[n];
+        for (Edge e : edges) exitCountArr[e.from]++;
+        int[] entryIdxCur = new int[n];
+        int[] exitIdxCur = new int[n];
+        for (Edge e : edges) {
+            e.entryIndex = entryIdxCur[e.to]++;
+            e.entryTotal = entryCountArr[e.to];
+            e.exitIndex = exitIdxCur[e.from]++;
+            e.exitTotal = exitCountArr[e.from];
+        }
     }
 
     private long edgeKey(int from, int to) { return ((long) from << 32) | (to & 0xFFFFFFFFL); }
@@ -329,10 +347,7 @@ public class FlowChartView extends View {
         canvas.drawText(block.label, left + PAD, top + HEADER_SIZE + PAD / 2, titlePaint);
 
         // 分隔线
-        Paint sepPaint = new Paint();
-        sepPaint.setColor(0xFF3D5A80);
-        sepPaint.setStrokeWidth(1f);
-        canvas.drawLine(left, headerBottom, right, headerBottom, sepPaint);
+        canvas.drawLine(left, headerBottom, right, headerBottom, separatorPaint);
 
         // 指令 - 不截断，方块已经够宽
         float iy = headerBottom + PAD + LINE_H * 0.8f;
@@ -398,44 +413,87 @@ public class FlowChartView extends View {
         float toTop = toBl.y;
 
         if (!isBack) {
-            // 正常边: 从底部出发 → 到顶部中心
-            float sx, sy, ex, ey;
-            sy = fromBottom;
-            ey = toTop;
+            float sx, sy = fromBottom, ex, ey = toTop;
+            int fromLayer = fromBl.layer;
+            int toLayer   = toBl.layer;
 
-            if (e.isConditional) {
-                // 根据目标位置决定出发点: 目标在左→从左出发, 目标在右→从右出发
-                // 避免线条交叉
-                if (toBl.x < fromBl.x) {
-                    sx = fromBl.x - fromBl.w * 0.25f;
-                } else if (toBl.x > fromBl.x) {
-                    sx = fromBl.x + fromBl.w * 0.25f;
-                } else {
-                    sx = (e.succIdx == 0) ? fromBl.x - fromBl.w * 0.25f : fromBl.x + fromBl.w * 0.25f;
-                }
+            // 出口点
+            if (e.isConditional && e.exitTotal == 2) {
+                sx = (e.succIdx == 0) ? fromBl.x - fromBl.w * 0.25f : fromBl.x + fromBl.w * 0.25f;
+            } else if (e.exitTotal > 1) {
+                float span = fromBl.w * 0.5f;
+                sx = fromBl.x - span / 2f + span * e.exitIndex / (float)(e.exitTotal - 1);
             } else {
                 sx = fromBl.x;
             }
-            ex = toBl.x;
 
-            if (Math.abs(sx - ex) < 3) {
-                // 几乎垂直 → 直线
-                canvas.drawLine(sx, sy, ex, ey - 10, lp);
-                drawArrowDown(canvas, ex, ey - 10, color);
+            // 入口点: 多入边横向错开
+            if (e.entryTotal > 1) {
+                float span = toBl.w * 0.5f;
+                ex = toBl.x - span / 2f + span * e.entryIndex / (float)(e.entryTotal - 1);
             } else {
-                // 有水平偏移 → 贝塞尔曲线 (IDA风格)
-                float midY = (sy + ey) / 2;
-                Path path = new Path();
-                path.moveTo(sx, sy);
-                path.cubicTo(sx, midY, ex, midY, ex, ey - 10);
-                canvas.drawPath(path, lp);
-                drawArrowDown(canvas, ex, ey - 10, color);
+                ex = toBl.x;
             }
 
-            // T/F 标注
+            if (toLayer - fromLayer > 1) {
+                // ── 跨层边: 绕侧面走，不穿中间任何块 ──
+                float gLeft = Float.MAX_VALUE, gRight = -Float.MAX_VALUE;
+                for (BlockLayout bl : layouts) {
+                    if (bl == null) continue;
+                    if (bl.layer > fromLayer && bl.layer < toLayer) {
+                        float l = bl.x - bl.w / 2;
+                        float r = bl.x + bl.w / 2;
+                        if (l < gLeft)  gLeft  = l;
+                        if (r > gRight) gRight = r;
+                    }
+                }
+                if (gLeft  ==  Float.MAX_VALUE) gLeft  = Math.min(sx, ex);
+                if (gRight == -Float.MAX_VALUE) gRight = Math.max(sx, ex);
+
+                boolean goRight = ex >= (gLeft + gRight) / 2f;
+                float laneOff = 36f + e.exitIndex * 22f;
+                float sideX   = goRight ? (gRight + laneOff) : (gLeft - laneOff);
+                int d = goRight ? 1 : -1;
+                float r = ARC_R;
+
+                Path path = new Path();
+                path.moveTo(sx, sy);
+                path.lineTo(sx, sy + 18);
+                path.quadTo(sx, sy + 18 + r, sx + d * r, sy + 18 + r);
+                path.lineTo(sideX - d * r, sy + 18 + r);
+                path.quadTo(sideX, sy + 18 + r, sideX, sy + 18);
+                path.lineTo(sideX, ey - 18);
+                path.quadTo(sideX, ey - 18 - r, sideX - d * r, ey - 18 - r);
+                path.lineTo(ex + d * r, ey - 18 - r);
+                path.quadTo(ex, ey - 18 - r, ex, ey - 18);
+                path.lineTo(ex, ey - 10);
+                canvas.drawPath(path, lp);
+
+            } else if (Math.abs(sx - ex) < 3) {
+                // 同列相邻层: 直线
+                canvas.drawLine(sx, sy, ex, ey - 10, lp);
+
+            } else {
+                // 不同列相邻层: Z形折线，多出口按 exitIndex 错开路由通道纵向位置
+                float routeY = sy + V_GAP * (0.15f + 0.55f * e.exitIndex / (float)Math.max(e.exitTotal, 1));
+                float cr = Math.min(ARC_R, Math.abs(ex - sx) / 2f);
+                int dirH = ex >= sx ? 1 : -1;
+
+                Path path = new Path();
+                path.moveTo(sx, sy);
+                path.lineTo(sx, routeY - cr);
+                path.quadTo(sx, routeY, sx + dirH * cr, routeY);
+                path.lineTo(ex - dirH * cr, routeY);
+                path.quadTo(ex, routeY, ex, routeY + cr);
+                path.lineTo(ex, ey - 10);
+                canvas.drawPath(path, lp);
+            }
+
+            drawArrowDown(canvas, ex, ey - 10, color);
+
             if (e.isConditional) {
                 String lbl = (e.succIdx == 0) ? "T" : "F";
-                float labelX = (sx < fromBl.x) ? sx - 18 : sx + 12;
+                float labelX = sx + (sx < fromBl.x ? -18 : 12);
                 drawEdgeLabel(canvas, lbl, labelX, sy + 18, color);
             }
         } else {

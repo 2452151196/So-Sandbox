@@ -27,6 +27,7 @@ import androidx.recyclerview.widget.RecyclerView;
 import com.example.anative.R;
 import com.example.anative.core.DataHolder;
 import com.example.anative.core.ElfParser;
+import com.example.anative.core.LicenseManager;
 import com.example.anative.core.NativeFunction;
 import com.example.anative.core.XRefScanner;
 import com.google.android.material.appbar.MaterialToolbar;
@@ -142,7 +143,9 @@ public class StringsActivity extends AppCompatActivity {
         // 加载函数列表（如果还没有加载）
         if (funcs == null && soPath != null) {
             try {
-                funcs = ElfParser.parseFunctions(soPath);
+                String discoveryMode = getSharedPreferences("app_prefs", MODE_PRIVATE)
+                        .getString(SettingsActivity.PREF_FUNCTION_DISCOVERY_MODE, "balanced");
+                funcs = ElfParser.parseFunctions(soPath, discoveryMode);
                 DataHolder.getInstance().setFunctions(funcs);
                 Log.i("StringsActivity", "Parsed " + (funcs != null ? funcs.size() : 0) + " functions");
             } catch (Exception e) {

@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.SpannableString;
+import android.widget.PopupMenu;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
 import android.util.TypedValue;
@@ -31,6 +32,7 @@ import com.example.anative.core.NativeInvoker;
 import com.example.anative.core.PltEntry;
 
 import java.io.File;
+import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
@@ -339,6 +341,95 @@ public class CodeViewActivity extends AppCompatActivity {
         return ss;
     }
 
+    private void showExportMenu(View anchor) {
+        PopupMenu popup = new PopupMenu(this, anchor);
+        popup.getMenu().add(0, 1, 0, "导出汇编");
+        popup.getMenu().add(0, 2, 1, "导出伪C");
+        popup.setOnMenuItemClickListener(item -> {
+            switch (item.getItemId()) {
+                case 1:
+                    exportCode(true);
+                    return true;
+                case 2:
+                    exportCode(false);
+                    return true;
+            }
+            return false;
+        });
+        popup.show();
+    }
+
+    private void exportCode(boolean exportAsm) {
+        executor.execute(() -> {
+            String code;
+            String ext;
+            if (exportAsm) {
+                if (cachedAsm == null) {
+                    String stringTable = buildStringTable(stringsList);
+                    String pltTable = buildPltTable(pltList);
+                    String funcTable = buildFuncTable();
+                    if (baseAddress == 0) {
+                        cachedAsm = disassembleFromFile(funcAddr, funcSize, stringTable, pltTable, funcTable);
+                    } else {
+                        cachedAsm = NativeInvoker.disassembleFunctionEx(funcAddr, funcSize, stringTable, pltTable, baseAddress, funcTable);
+                    }
+                }
+                code = cachedAsm;
+                ext = ".asm";
+            } else {
+                if (cachedPseudoC == null) {
+                    String name = demangledName != null ? demangledName : funcName;
+                    if (baseAddress == 0) {
+                        cachedPseudoC = decompileFromFile(funcAddr, funcSize, name, signature);
+                    } else {
+                        cachedPseudoC = NativeInvoker.decompileFunctionEx(funcAddr, funcSize, name, signature, baseAddress);
+                    }
+                }
+                code = cachedPseudoC;
+                ext = ".c";
+            }
+
+            if (code == null || code.isEmpty() || code.startsWith("ERR:")) {
+                handler.post(() -> Toast.makeText(this, "无数据可导出", Toast.LENGTH_SHORT).show());
+                return;
+            }
+
+            try {
+                File destDir = new File(android.os.Environment.getExternalStorageDirectory(), "SoSandbox");
+                if (!destDir.exists()) destDir.mkdirs();
+
+                String safeName = (funcName != null ? funcName : "func_" + Long.toHexString(funcAddr))
+                        .replaceAll("[^a-zA-Z0-9_.-]", "_");
+                if (safeName.length() > 80) safeName = safeName.substring(0, 80);
+                String fileName = safeName + "_0x" + Long.toHexString(funcOffset) + ext;
+                File destFile = new File(destDir, fileName);
+
+                FileWriter writer = new FileWriter(destFile);
+                writer.write(code);
+                writer.close();
+
+                handler.post(() -> showExportSuccessDialog(destFile));
+            } catch (Exception e) {
+                handler.post(() -> Toast.makeText(this,
+                        "导出失败: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void showExportSuccessDialog(File savedFile) {
+        String path = savedFile.getAbsolutePath();
+        new AlertDialog.Builder(this)
+                .setTitle("导出成功")
+                .setMessage(path)
+                .setPositiveButton("复制路径", (dialog, which) -> {
+                    ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(ClipData.newPlainText("导出路径", path));
+                    Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
     private void saveModifiedSo() {
         String originalUriStr = DataHolder.getInstance().getOriginalUri();
         String soPath = DataHolder.getInstance().getSoPath();
@@ -359,7 +450,8 @@ public class CodeViewActivity extends AppCompatActivity {
         executor.execute(() -> {
             try {
                 Uri originalUri = Uri.parse(originalUriStr);
-                String destDir = getExternalFilesDir(null).getAbsolutePath();
+                File destDir = new File(android.os.Environment.getExternalStorageDirectory(), "SoSandbox");
+                if (!destDir.exists()) destDir.mkdirs();
                 File destFile = new File(destDir, newFileName);
 
                 InputStream is = getContentResolver().openInputStream(originalUri);

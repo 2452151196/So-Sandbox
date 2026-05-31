@@ -114,6 +114,121 @@ public class ElfParser {
      * 解析SO文件，提取所有FUNC类型的符号
      */
     public static List<NativeFunction> parseFunctions(String soPath) throws IOException {
+        return parseFunctions(soPath, "balanced");
+    }
+
+    public static NativeFunction recognizeFunctionAtAddress(String soPath, long address,
+                                                            List<NativeFunction> knownFunctions) throws IOException {
+        return recognizeFunctionAtAddress(soPath, address, knownFunctions, 0);
+    }
+
+    public static NativeFunction recognizeFunctionAtAddress(String soPath, long address,
+                                                            List<NativeFunction> knownFunctions,
+                                                            long expectedSize) throws IOException {
+        ElfFile elfFile = safeOpenElf(soPath);
+        ElfSectionHeader execHdr = null;
+        int numSections = elfFile.e_shnum;
+        for (int i = 0; i < numSections; i++) {
+            ElfSection sec = elfFile.getSection(i);
+            ElfSectionHeader header = sec.header;
+            if (isExecutableSection(header)
+                    && address >= header.sh_addr
+                    && address < header.sh_addr + header.sh_size) {
+                execHdr = header;
+                break;
+            }
+        }
+
+        if (execHdr == null || execHdr.sh_size <= 0) {
+            throw new IOException(String.format("地址 0x%X 不在可执行段内", address));
+        }
+
+        long execStart = execHdr.sh_addr;
+        long execEnd = execHdr.sh_addr + execHdr.sh_size;
+
+        List<NativeFunction> knownList = knownFunctions != null ? knownFunctions : new ArrayList<>();
+        for (NativeFunction existing : knownList) {
+            if (existing == null) continue;
+            if (existing.getOffset() == address) {
+                return existing;
+            }
+        }
+
+        List<long[]> knownRanges = new ArrayList<>();
+        List<Long> sortedKnownOffsets = new ArrayList<>();
+        for (NativeFunction f : knownList) {
+            if (f == null) continue;
+            sortedKnownOffsets.add(f.getOffset());
+            if (f.getOffset() == address) continue;
+            if (f.getSize() > 0) {
+                knownRanges.add(new long[]{f.getOffset(), f.getOffset() + f.getSize()});
+            }
+        }
+        sortedKnownOffsets.sort(Long::compareTo);
+
+        try (RandomAccessFile raf = new RandomAccessFile(new File(soPath), "r")) {
+            long fileOff = execHdr.sh_offset + (address - execStart);
+            long maxScan = Math.min(execEnd - address, 65536);
+            if (maxScan < 4) {
+                return new NativeFunction(String.format("sub_%X", address), address, 4, "manual");
+            }
+
+            byte[] code = new byte[(int) maxScan];
+            raf.seek(fileOff);
+            raf.readFully(code);
+
+            long nextKnownStart = findNextVerifiedFunctionStart(address, sortedKnownOffsets, execEnd, code);
+            long scanLimit = Math.min(maxScan, nextKnownStart - address);
+            if (scanLimit < 4) {
+                scanLimit = Math.min(maxScan, 256);
+            }
+
+            long estimatedSize;
+            if (expectedSize > 0) {
+                estimatedSize = Math.min(expectedSize, scanLimit);
+                if (estimatedSize < 4) {
+                    estimatedSize = Math.min(Math.max(scanLimit, 4), 4);
+                }
+            } else {
+                Set<Integer> reachableOffsets = collectReachableInstructionOffsets(code, address, scanLimit, knownRanges);
+                estimatedSize = findFunctionEndViaCFG(code, address, scanLimit, knownRanges, reachableOffsets);
+                if (estimatedSize <= 0) {
+                    estimatedSize = estimateFunctionSize(code, 0, address, new HashSet<>(sortedKnownOffsets), execEnd);
+                }
+
+                if (estimatedSize <= 0) {
+                    estimatedSize = Math.min(scanLimit, 256);
+                }
+            }
+
+            if (nextKnownStart > address) {
+                estimatedSize = Math.min(estimatedSize, nextKnownStart - address);
+            }
+            if (estimatedSize < 4) {
+                estimatedSize = Math.min(Math.max(scanLimit, 4), 4);
+            }
+
+            return new NativeFunction(String.format("sub_%X", address), address, estimatedSize, "manual");
+        }
+    }
+
+    private static boolean isExecutableSection(ElfSectionHeader header) {
+        return header != null
+                && header.sh_size > 0
+                && (header.sh_flags & 0x4L) != 0;
+    }
+
+    /**
+     * 按函数发现模式解析SO文件
+     * precise: 仅符号表
+     * balanced: 符号表 + init/fini + BL发现（默认）
+     * max_coverage: balanced + text扫描
+     */
+    public static List<NativeFunction> parseFunctions(String soPath, String discoveryMode) throws IOException {
+        String resolvedMode = normalizeFunctionDiscoveryMode(discoveryMode);
+        boolean preciseMode = "precise".equals(resolvedMode);
+        boolean maxCoverageMode = "max_coverage".equals(resolvedMode);
+
         Set<NativeFunction> funcSet = new LinkedHashSet<>();
         ElfFile elfFile = safeOpenElf(soPath);
 
@@ -151,7 +266,17 @@ public class ElfParser {
             }
         }
 
-        // 从 .init_array / .fini_array 补充未在符号表中的函数
+        Log.i(TAG, "Function discovery mode: " + resolvedMode);
+
+        // precise模式: 仅使用符号表函数
+        if (preciseMode) {
+            List<NativeFunction> preciseResult = deduplicateFunctionsByOffset(funcSet);
+            clampFunctionSizesToNextStart(preciseResult);
+            Log.i(TAG, "Total FUNC symbols found (precise): " + preciseResult.size());
+            return preciseResult;
+        }
+
+        // 从 .init_array / .fini_array 补充未在符号表中的函数（balanced/max_coverage）
         Set<Long> knownOffsets = new java.util.HashSet<>();
         for (NativeFunction f : funcSet) knownOffsets.add(f.getOffset());
 
@@ -240,11 +365,11 @@ public class ElfParser {
             long textEnd = (textHdr != null) ? textHdr.sh_addr + textHdr.sh_size : 0;
             long textFileOff = (textHdr != null) ? textHdr.sh_offset : 0;
 
-            // text_scan 已禁用 - 产生大量假函数（如 136 字节函数被识别成 18380 字节）
-            // 只依赖更可靠的来源：符号表、init/fini、BL 目标发现
-            // if (textHdr != null && textHdr.sh_size > 0) {
-            //     discoverAllFunctionsInTextSection(raf, textStart, textEnd, textFileOff, funcSet, knownOffsets);
-            // }
+            // balanced / max_coverage 都扫描所有可执行段发现函数
+            // balanced 保守阈值, max_coverage 激进阈值
+            if (!preciseMode) {
+                discoverFunctionsInExecutableSections(raf, elfFile, funcSet, knownOffsets, maxCoverageMode);
+            }
 
             List<Long> sortedKnownOffsets = new ArrayList<>(knownOffsets);
             sortedKnownOffsets.sort(Long::compareTo);
@@ -325,8 +450,16 @@ public class ElfParser {
         }
 
         List<NativeFunction> result = deduplicateFunctionsByOffset(funcSet);
+        clampFunctionSizesToNextStart(result);
         Log.i(TAG, "Total FUNC symbols found: " + result.size());
         return result;
+    }
+
+    private static String normalizeFunctionDiscoveryMode(String mode) {
+        if ("precise".equals(mode) || "balanced".equals(mode) || "max_coverage".equals(mode)) {
+            return mode;
+        }
+        return "balanced";
     }
 
     private static List<NativeFunction> deduplicateFunctionsByOffset(Set<NativeFunction> funcSet) {
@@ -372,15 +505,43 @@ public class ElfParser {
         boolean bSynthetic = isSyntheticFunction(b);
 
         if (!(aSynthetic && bSynthetic)) {
-            // 对于非合成函数，只在明确范围重叠时判重
-            return rangesOverlap(a, b);
+            // 非合成函数（来自符号表）：只在 offset 完全相同时合并
+            // 不因 size 偏大造成的 range 重叠而合并，否则相邻合法函数会被吃掉
+            return diff == 0;
         }
 
-        // 合成函数：常见重复是入口前导(BTI/PAC)与真正序言相差4或8字节
-        if (diff <= 8) return true;
+        // 合成函数：BTI/PAC 前导与真正序言差 4 字节，允许合并
+        if (diff <= 4) return true;
 
-        // 如果存在范围重叠也判重
+        // 合成函数 range 重叠也判重（大 size 已由 clamp 修正，这里是 diff>4 的安全检查）
         return rangesOverlap(a, b);
+    }
+
+    /**
+     * 把每个函数的 size 裁剪到「下一个函数起始地址 - 当前起始地址」
+     * 防止符号表里的 size 偏大，导致一个函数的反汇编视图包含了下一个函数的代码
+     */
+    private static void clampFunctionSizesToNextStart(List<NativeFunction> sorted) {
+        for (int i = 0; i < sorted.size() - 1; i++) {
+            NativeFunction cur  = sorted.get(i);
+            NativeFunction next = sorted.get(i + 1);
+            long gap = next.getOffset() - cur.getOffset();
+            if (gap <= 0) continue;
+            if (cur.getSize() == 0 || cur.getSize() > gap) {
+                Log.d("ElfParser", String.format("clamp %s size %d -> %d",
+                        cur.getName(), cur.getSize(), gap));
+                cur.setSize(gap);
+            }
+        }
+        // 最后一个函数也加限制
+        if (!sorted.isEmpty()) {
+            NativeFunction last = sorted.get(sorted.size() - 1);
+            if (last.getSize() > MAX_FUNCTION_SIZE) {
+                Log.d("ElfParser", String.format("clamp last %s size %d -> %d",
+                        last.getName(), last.getSize(), MAX_FUNCTION_SIZE));
+                last.setSize(MAX_FUNCTION_SIZE);
+            }
+        }
     }
 
     private static boolean isSyntheticFunction(NativeFunction f) {
@@ -433,7 +594,35 @@ public class ElfParser {
         return false;
     }
 
+    private static boolean hasStrongEntryPattern(byte[] code, int off) {
+        if (off < 0 || off + 4 > code.length) return false;
+        int insn0 = readInt32(code, off);
+        if ((insn0 & 0xFFC003FF) == 0xA9807BFD || (insn0 & 0xFFC003FF) == 0xA9007BFD) {
+            return true;
+        }
+        if (insn0 == 0x910003FD) {
+            return true;
+        }
+        return isPreludeToStrongPrologue(code, off);
+    }
+
+    private static boolean isPreludeToStrongPrologue(byte[] code, int off) {
+        if (off < 0 || off + 8 > code.length) return false;
+        int insn0 = readInt32(code, off);
+        if (insn0 != 0xD503241F && insn0 != 0xD503233F && insn0 != 0xD503233D) {
+            return false;
+        }
+        int insn1 = readInt32(code, off + 4);
+        return (insn1 & 0xFFC003FF) == 0xA9807BFD
+                || (insn1 & 0xFFC003FF) == 0xA9007BFD
+                || insn1 == 0x910003FD;
+    }
+
     private static boolean isLikelyFunctionEntry(byte[] code, int off, long va) {
+        return isLikelyFunctionEntry(code, off, va, false);
+    }
+
+    private static boolean isLikelyFunctionEntry(byte[] code, int off, long va, boolean aggressive) {
         if (off < 0 || off + 4 > code.length) return false;
 
         int entryScore = 0;
@@ -465,11 +654,19 @@ public class ElfParser {
             return false;
         }
 
-        if (entryScore < 3 || boundaryScore < 2) return false;
+        if (entryScore < 3 || boundaryScore < 2) {
+            if (!aggressive) return false;
+        }
 
         if ((va & 3) != 0) return false;
 
         if (entryScore >= 5) return true;
+
+        if (aggressive) {
+            if (entryScore >= 4 && boundaryScore >= 1) return true;
+            if (entryScore >= 3 && boundaryScore >= 1 && hasStrongEntryPattern(code, off)) return true;
+            if (isPreludeToStrongPrologue(code, off) && boundaryScore >= 1) return true;
+        }
 
         return (entryScore >= 4 && boundaryScore >= 3);
     }
@@ -488,73 +685,134 @@ public class ElfParser {
     }
 
     /**
-     * 全面扫描 text section 识别所有函数 (处理被剥离符号的SO)
-     * 通过识别 AArch64 函数序言模式来发现函数边界
+     * 扫描所有可执行段识别函数 (处理被剥离符号的SO)
+     * balanced / max_coverage 都会调用, aggressive 参数控制阈值
      */
-    private static void discoverAllFunctionsInTextSection(
-            RandomAccessFile raf, long textStart, long textEnd, long textFileOff,
-            Set<NativeFunction> funcSet, Set<Long> knownOffsets) throws IOException {
+    private static void discoverFunctionsInExecutableSections(
+            RandomAccessFile raf, ElfFile elfFile,
+            Set<NativeFunction> funcSet, Set<Long> knownOffsets,
+            boolean aggressive) throws IOException {
 
-        if (textStart == 0 || textEnd <= textStart) return;
+        int totalDiscovered = 0;
 
-        long textSize = textEnd - textStart;
-        if (textSize > 50 * 1024 * 1024) textSize = 50 * 1024 * 1024; // 限制50MB
+        for (int i = 0; i < elfFile.e_shnum; i++) {
+            ElfSectionHeader h = elfFile.getSection(i).header;
+            if (!isExecutableSection(h) || h.sh_size <= 0) continue;
 
-        byte[] code = new byte[(int) textSize];
-        raf.seek(textFileOff);
+            int discovered = scanSegmentForFunctions(raf, h.sh_addr, h.sh_addr + h.sh_size,
+                    h.sh_offset, funcSet, knownOffsets, aggressive);
+            totalDiscovered += discovered;
+        }
+
+        Log.i(TAG, "Executable scan discovered " + totalDiscovered + " functions total (aggressive=" + aggressive + ")");
+    }
+
+    private static int scanSegmentForFunctions(
+            RandomAccessFile raf, long segStart, long segEnd, long segFileOff,
+            Set<NativeFunction> funcSet, Set<Long> knownOffsets,
+            boolean aggressive) throws IOException {
+
+        if (segStart == 0 || segEnd <= segStart) return 0;
+
+        long segSize = segEnd - segStart;
+        if (segSize > 50 * 1024 * 1024) segSize = 50 * 1024 * 1024;
+
+        byte[] code = new byte[(int) segSize];
+        raf.seek(segFileOff);
         raf.readFully(code);
-
-        // AArch64 函数序言常见模式:
-        // 1. STP x29, x30, [sp, #-16]!  (0xA9...)
-        // 2. SUB sp, sp, #imm
-        // 3. MOV x29, sp 或 ADD x29, sp, #imm
-        // 4. 其他: STP x?, x?, [sp, #imm] 保存寄存器
 
         List<Long> funcStarts = new ArrayList<>();
         Map<Long, Integer> callTargetCount = new HashMap<>();
 
         for (int off = 0; off + 4 <= code.length; off += 4) {
-            int insn = readInt32(code, off);
-            long va = textStart + off;
+            long va = segStart + off;
 
-            if (isLikelyFunctionEntry(code, off, va)) {
+            if (isLikelyFunctionEntry(code, off, va, aggressive)) {
                 if (!knownOffsets.contains(va)) {
                     funcStarts.add(va);
                 }
             }
 
+            int insn = readInt32(code, off);
             if ((insn & 0xFC000000) == 0x94000000) {
                 int imm26 = insn & 0x03FFFFFF;
                 if ((imm26 & 0x02000000) != 0) imm26 |= 0xFC000000;
                 long target = va + (long) imm26 * 4;
-                if (target >= textStart && target < textEnd) {
+                if (target >= segStart && target < segEnd) {
                     callTargetCount.put(target, callTargetCount.getOrDefault(target, 0) + 1);
                 }
             }
         }
 
+        int blThresh = aggressive ? 2 : 3;
+        int blThreshShape = aggressive ? 4 : 6;
+
         for (Map.Entry<Long, Integer> e : callTargetCount.entrySet()) {
             long target = e.getKey();
             int count = e.getValue();
             if (knownOffsets.contains(target)) continue;
-            int targetOff = (int) (target - textStart);
+            int targetOff = (int) (target - segStart);
             if (targetOff < 0 || targetOff + 4 > code.length) continue;
-            if ((count >= 3 && isLikelyFunctionEntry(code, targetOff, target)) ||
-                    (count >= 5 && hasReasonableCallTargetShape(code, targetOff))) {
+            if ((count >= blThresh && isLikelyFunctionEntry(code, targetOff, target, aggressive)) ||
+                    (count >= blThreshShape && hasReasonableCallTargetShape(code, targetOff))) {
                 funcStarts.add(target);
             }
         }
 
-        List<Long> normalizedStarts = normalizeFunctionStarts(funcStarts, code, textStart);
+        // aggressive 模式下额外识别 ADRP 开头的 il2cpp 函数
+        if (aggressive) {
+            for (int off = 0; off + 8 <= code.length; off += 4) {
+                long va = segStart + off;
+                if (knownOffsets.contains(va) || funcStarts.contains(va)) continue;
+
+                int insn0 = readInt32(code, off);
+                // ADRP: (insn & 0x9F000000) == 0x90000000
+                if ((insn0 & 0x9F000000) != 0x90000000) continue;
+
+                int insn1 = readInt32(code, off + 4);
+                boolean usesAdrp = false;
+                // ADD (immediate, 32/64-bit)
+                if ((insn1 & 0x1F000000) == 0x11000000) usesAdrp = true;
+                // LDR (literal)
+                if ((insn1 & 0x3F000000) == 0x18000000) usesAdrp = true;
+                // LDR (unsigned offset, 32-bit)
+                if ((insn1 & 0xBFE00C00) == 0xB9400000) usesAdrp = true;
+                // STR (unsigned offset, 32-bit)
+                if ((insn1 & 0xBFE00C00) == 0xB9000000) usesAdrp = true;
+
+                if (!usesAdrp) continue;
+
+                boolean boundaryOk = false;
+                if (off == 0) boundaryOk = true;
+                else {
+                    int prevInsn = readInt32(code, off - 4);
+                    if (looksLikeFunctionEnd(prevInsn)) boundaryOk = true;
+                    if (prevInsn == 0xD503201F && (va % 16 == 0)) boundaryOk = true;
+                }
+
+                if (boundaryOk && (va % 4 == 0)) {
+                    Integer blCount = callTargetCount.get(va);
+                    if (blCount != null && blCount >= 1) {
+                        funcStarts.add(va);
+                    }
+                }
+            }
+        }
+
+        List<Long> normalizedStarts = normalizeFunctionStarts(funcStarts, code, segStart);
 
         List<Long> validStarts = new ArrayList<>();
         for (long funcAddr : normalizedStarts) {
-            int off = (int) (funcAddr - textStart);
+            int off = (int) (funcAddr - segStart);
             if (off < 0 || off >= code.length) continue;
 
-            long estimatedSize = estimateFunctionSize(code, off, funcAddr, knownOffsets, textEnd);
-            if (estimatedSize > 4096) {
-                Log.d(TAG, "Text scan rejected too large: " + String.format("sub_%X (size=%d)", funcAddr, estimatedSize));
+            long estimatedSize = estimateFunctionSize(code, off, funcAddr, knownOffsets, segEnd);
+            if (estimatedSize > 65536) {
+                // 超大函数先给 size=0, 后续 BL 扫描再定
+                estimatedSize = 0;
+            }
+            if (estimatedSize > 16384 && !aggressive) {
+                Log.d(TAG, "Scan rejected too large (conservative): " + String.format("sub_%X (size=%d)", funcAddr, estimatedSize));
                 continue;
             }
             validStarts.add(funcAddr);
@@ -567,55 +825,85 @@ public class ElfParser {
             Log.d(TAG, "Text scan discovered: " + label);
         }
 
-        Log.i(TAG, "Text scan discovered " + validStarts.size() + " functions");
+        return validStarts.size();
     }
 
     private static List<Long> normalizeFunctionStarts(List<Long> starts, byte[] code, long textStart) {
         if (starts.isEmpty()) return starts;
 
         starts.sort(Long::compareTo);
-        LinkedHashMap<Long, Boolean> kept = new LinkedHashMap<>();
 
+        // 一次归一：把 BTI/PAC 前导链映射到统一入口（最早前导地址）
+        LinkedHashMap<Long, Boolean> canonicalStarts = new LinkedHashMap<>();
         for (Long start : starts) {
             if (start == null) continue;
-
-            long prev = start - 4;
-            Long removeKey = null;
-
-            if (kept.containsKey(prev) && isPreludeToFunction(code, textStart, prev, start)) {
-                removeKey = prev;
-            }
-
-            if (removeKey != null) {
-                kept.remove(removeKey);
-            }
-            kept.put(start, true);
+            long canonical = canonicalizeFunctionStart(start, code, textStart);
+            canonicalStarts.put(canonical, true);
         }
 
-        // 二次归一：如果当前入口是 BTI/PAC，且 +4 也是强入口，保留更早地址
-        List<Long> sorted = new ArrayList<>(kept.keySet());
+        // 二次归一：如果多个入口最终指向同一个核心序言（如 STP x29, x30）则折叠
+        List<Long> sorted = new ArrayList<>(canonicalStarts.keySet());
         sorted.sort(Long::compareTo);
-        LinkedHashMap<Long, Boolean> finalKept = new LinkedHashMap<>();
+
+        List<Long> finalStarts = new ArrayList<>();
         for (Long addr : sorted) {
-            int off = (int) (addr - textStart);
-            if (off >= 0 && off + 8 <= code.length) {
-                int insn0 = readInt32(code, off);
-                int insn1 = readInt32(code, off + 4);
-                long next = addr + 4;
-                if ((insn0 == 0xD503241F || insn0 == 0xD503233F || insn0 == 0xD503233D)
-                        && isFunctionPrologue(insn1)
-                        && kept.containsKey(next)) {
-                    finalKept.put(addr, true);
-                    continue;
-                }
+            if (addr == null) continue;
+            if (finalStarts.isEmpty()) {
+                finalStarts.add(addr);
+                continue;
             }
-            // 如果已经被前一个入口覆盖就跳过
-            if (!finalKept.containsKey(addr)) {
-                finalKept.put(addr, true);
+
+            long prev = finalStarts.get(finalStarts.size() - 1);
+            if (shouldCollapseNearbyStarts(prev, addr, code, textStart)) {
+                continue;
             }
+            finalStarts.add(addr);
         }
 
-        return new ArrayList<>(finalKept.keySet());
+        return finalStarts;
+    }
+
+    private static long canonicalizeFunctionStart(long startAddr, byte[] code, long textStart) {
+        int off = (int) (startAddr - textStart);
+        if (off < 0 || off + 4 > code.length) return startAddr;
+
+        int current = off;
+        for (int i = 0; i < 3; i++) {
+            int prev = current - 4;
+            if (prev < 0 || prev + 4 > code.length) break;
+            int prevInsn = readInt32(code, prev);
+            if (!isPreludeInsn(prevInsn)) break;
+            current = prev;
+        }
+        return textStart + current;
+    }
+
+    private static boolean shouldCollapseNearbyStarts(long prevAddr, long curAddr, byte[] code, long textStart) {
+        long diff = curAddr - prevAddr;
+        if (diff <= 0) return true;
+        if (diff > 12) return false;
+
+        long prevCore = findCorePrologueAddress(prevAddr, code, textStart);
+        long curCore = findCorePrologueAddress(curAddr, code, textStart);
+        return prevCore > 0 && prevCore == curCore;
+    }
+
+    private static long findCorePrologueAddress(long startAddr, byte[] code, long textStart) {
+        int off = (int) (startAddr - textStart);
+        if (off < 0 || off + 4 > code.length) return -1;
+
+        for (int i = 0; i < 4; i++) {
+            int pos = off + i * 4;
+            if (pos < 0 || pos + 4 > code.length) break;
+            int insn = readInt32(code, pos);
+            if (isCoreFunctionPrologue(insn)) {
+                return textStart + pos;
+            }
+            if (!isPreludeInsn(insn)) {
+                break;
+            }
+        }
+        return -1;
     }
 
     private static boolean isPreludeToFunction(byte[] code, long textStart, long preludeAddr, long entryAddr) {
@@ -633,6 +921,19 @@ public class ElfParser {
                 || preludeInsn == 0xD503233D;           // PACIBSP
 
         return preludeLike && isFunctionPrologue(entryInsn);
+    }
+
+    private static boolean isPreludeInsn(int insn) {
+        return insn == 0xD503241F // BTI c
+                || insn == 0xD503233F // PACIASP
+                || insn == 0xD503233D; // PACIBSP
+    }
+
+    private static boolean isCoreFunctionPrologue(int insn) {
+        if ((insn & 0xFFC003FF) == 0xA9807BFD || (insn & 0xFFC003FF) == 0xA9007BFD) {
+            return true;
+        }
+        return insn == 0x910003FD;
     }
 
     /**
@@ -689,22 +990,78 @@ public class ElfParser {
         return (insn & 0xFF000010) == 0x54000000 || (insn & 0xFC000000) == 0x14000000;
     }
 
+    private static final long MAX_FUNCTION_SIZE = 16384; // 16KB hard cap
+
     private static long estimateFunctionSize(byte[] code, int off, long va, Set<Long> knownOffsets, long textEnd) {
-        long lastTerminal = 0;
-        int maxScan = Math.min(code.length - off, 8192);
+        int maxScan = Math.min(code.length - off, (int) MAX_FUNCTION_SIZE);
+
+        // 找到第一个 RET/terminal 指令，并检查其后是否为函数边界
         for (int i = 0; i + 4 <= maxScan; i += 4) {
             int insn = readInt32(code, off + i);
             if (looksLikeFunctionEnd(insn)) {
-                lastTerminal = i + 4;
+                long candidateEnd = i + 4;
+                // 检查后续是否为新函数入口、对齐NOP或已知函数
+                if (candidateEnd >= maxScan) {
+                    return candidateEnd;
+                }
+                int nextOff = off + (int) candidateEnd;
+                if (nextOff + 4 > code.length) {
+                    return candidateEnd;
+                }
+                long nextVa = va + candidateEnd;
+                // 下一条是已知函数起始
+                if (knownOffsets.contains(nextVa)) {
+                    return candidateEnd;
+                }
+                int nextInsn = readInt32(code, nextOff);
+                // 下一条是函数 prologue
+                if (isFunctionPrologue(nextInsn)) {
+                    return candidateEnd;
+                }
+                // 下一条是 NOP 对齐 (0xD503201F) 或 BTI (0xD503241F)
+                if (nextInsn == 0xD503201F || nextInsn == 0xD503241F) {
+                    return candidateEnd;
+                }
+                // 下一条是零填充
+                if (nextInsn == 0x00000000) {
+                    return candidateEnd;
+                }
+                // RET 后面是非终止指令，可能是多路径函数，继续扫描
             }
         }
-        if (lastTerminal > 0) return lastTerminal;
-        return Math.min(maxScan, 512);
+        // 未找到明确终止，返回 maxScan
+        return maxScan;
     }
 
     private static long findNextKnownFunctionStart(long current, List<Long> sortedKnownOffsets, long textEnd) {
         for (Long offset : sortedKnownOffsets) {
             if (offset != null && offset > current) {
+                return offset;
+            }
+        }
+        return textEnd;
+    }
+
+    private static long findNextVerifiedFunctionStart(long current, List<Long> sortedKnownOffsets, long textEnd, byte[] code) {
+        for (Long offset : sortedKnownOffsets) {
+            if (offset == null || offset <= current) continue;
+            int relOff = (int) (offset - current);
+            if (relOff < 0 || relOff >= code.length) continue;
+
+            boolean prologueOk = false;
+            boolean prevEndOk = false;
+
+            if (relOff + 4 <= code.length) {
+                int insnAtCandidate = readInt32(code, relOff);
+                prologueOk = isFunctionPrologue(insnAtCandidate);
+            }
+
+            if (relOff >= 4) {
+                int prevInsn = readInt32(code, relOff - 4);
+                prevEndOk = looksLikeFunctionEnd(prevInsn);
+            }
+
+            if (prologueOk && prevEndOk) {
                 return offset;
             }
         }
@@ -765,7 +1122,7 @@ public class ElfParser {
     }
 
     private static long findFunctionEndViaCFG(byte[] code, long funcStart, long maxScan, List<long[]> knownRanges, Set<Integer> reachableOffsets) {
-        if (reachableOffsets == null || reachableOffsets.isEmpty()) return Math.min(maxScan, 256);
+        if (reachableOffsets == null || reachableOffsets.isEmpty()) return maxScan;
 
         long farthestEnd = 0;
 
@@ -802,7 +1159,7 @@ public class ElfParser {
                 farthestReachable = Math.max(farthestReachable, off + 4L);
             }
         }
-        return farthestReachable > 0 ? farthestReachable : Math.min(maxScan, 256);
+        return farthestReachable > 0 ? farthestReachable : maxScan;
     }
 
     private static int getBranchTargetOffset(int insn, int off) {

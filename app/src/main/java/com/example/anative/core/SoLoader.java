@@ -79,6 +79,11 @@ public class SoLoader {
         loadedSoPath = targetFile.getAbsolutePath();
         Log.i(TAG, "SO copied to: " + loadedSoPath);
 
+        // 检查 ELF 架构，禁止 32 位 ARM
+        if (!checkElfArch(targetFile)) {
+            throw new IOException("不支持的 SO 文件：32 位 ARM 架构 (仅支持 64 位 ARM64)");
+        }
+
         // 自动备份：仅在当前工作目录保留一份原始副本
         try {
             File backupFile = new File(soDir, originalFileName + ".bak");
@@ -231,6 +236,39 @@ public class SoLoader {
             }
         }
         return fileName;
+    }
+
+    /**
+     * 检查 ELF 文件架构，返回 true 表示支持 (64位ARM)，false 表示不支持 (32位ARM)
+     */
+    private boolean checkElfArch(File soFile) {
+        try (FileInputStream fis = new FileInputStream(soFile)) {
+            byte[] header = new byte[20];
+            if (fis.read(header) < 20) {
+                Log.w(TAG, "Failed to read ELF header");
+                return false;
+            }
+            // Check ELF magic
+            if (header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' || header[3] != 'F') {
+                Log.w(TAG, "Not a valid ELF file");
+                return false;
+            }
+            // e_machine is at offset 18 for both ELF32 and ELF64
+            int eMachine = (header[19] & 0xFF) << 8 | (header[18] & 0xFF);
+            Log.i(TAG, "ELF e_machine: 0x" + Integer.toHexString(eMachine));
+            // EM_ARM = 0x28 (32-bit), EM_AARCH64 = 0xB7 (64-bit)
+            if (eMachine == 0x28) {
+                Log.w(TAG, "32-bit ARM SO detected, not supported");
+                return false;
+            }
+            if (eMachine != 0xB7 && eMachine != 0x3E) {
+                Log.w(TAG, "Unknown architecture: 0x" + Integer.toHexString(eMachine));
+            }
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to check ELF arch: " + e.getMessage());
+            return false;
+        }
     }
 
     private void copyFile(File src, File dst) throws IOException {

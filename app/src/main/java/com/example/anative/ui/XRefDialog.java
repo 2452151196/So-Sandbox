@@ -9,10 +9,11 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
-import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
+
+import com.google.android.material.button.MaterialButton;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -72,20 +73,26 @@ public class XRefDialog extends DialogFragment {
         View view = LayoutInflater.from(getContext()).inflate(R.layout.dialog_xrefs, null);
 
         TextView tvTitle = view.findViewById(R.id.tv_title);
-        Button btnCalls = view.findViewById(R.id.btn_calls);
-        Button btnCalled = view.findViewById(R.id.btn_called);
-        Button btnClose = view.findViewById(R.id.btn_close);
+        TextView tvSubtitle = view.findViewById(R.id.tv_subtitle);
+        TextView tvStats = view.findViewById(R.id.tv_stats);
+        MaterialButton btnCalls = view.findViewById(R.id.btn_calls);
+        MaterialButton btnCalled = view.findViewById(R.id.btn_called);
+        MaterialButton btnClose = view.findViewById(R.id.btn_close);
         ListView listCalls = view.findViewById(R.id.list_calls);
         ListView listCalled = view.findViewById(R.id.list_called);
         TextView tvEmpty = view.findViewById(R.id.tv_empty);
+        LinearLayout layoutEmpty = view.findViewById(R.id.layout_empty);
 
         btnClose.setOnClickListener(v -> dismiss());
+
+        // 设置标题和副标题
+        tvTitle.setText(function.getDemangledName());
+        tvSubtitle.setText(String.format("地址: 0x%X  |  大小: %d bytes",
+                function.getOffset(), function.getSize()));
 
         boolean useScannerData = scannerCallers != null && scannerCallees != null
                 && (!scannerCallers.isEmpty() || !scannerCallees.isEmpty()
                 || (callsFrom != null && callsFrom.isEmpty() && callsTo != null && callsTo.isEmpty()));
-
-        tvTitle.setText(function.getDemangledName());
 
         final int MAX_DISPLAY = 50;
 
@@ -123,6 +130,9 @@ public class XRefDialog extends DialogFragment {
             }
         }
 
+        // 设置统计信息
+        tvStats.setText(String.format("调用: %d  |  被调用: %d", outgoingItems.size(), incomingItems.size()));
+
         // 设置调用列表适配器
         XRefAdapter adapterCalls = new XRefAdapter(requireContext(), outgoingItems);
         listCalls.setAdapter(adapterCalls);
@@ -143,23 +153,25 @@ public class XRefDialog extends DialogFragment {
 
         // 初始显示"调用"tab
         updateTabState(btnCalls, btnCalled, true);
-        applyEmptyState(listCalls, listCalled, tvEmpty, outgoingItems, true);
+        applyEmptyState(listCalls, listCalled, layoutEmpty, outgoingItems, true);
 
         btnCalls.setOnClickListener(v -> {
             updateTabState(btnCalls, btnCalled, true);
-            applyEmptyState(listCalls, listCalled, tvEmpty, outgoingItems, true);
+            applyEmptyState(listCalls, listCalled, layoutEmpty, outgoingItems, true);
+            tvStats.setText(String.format("调用: %d  |  被调用: %d", outgoingItems.size(), incomingItems.size()));
         });
 
         btnCalled.setOnClickListener(v -> {
             updateTabState(btnCalls, btnCalled, false);
-            applyEmptyState(listCalls, listCalled, tvEmpty, incomingItems, false);
+            applyEmptyState(listCalls, listCalled, layoutEmpty, incomingItems, false);
+            tvStats.setText(String.format("调用: %d  |  被调用: %d", outgoingItems.size(), incomingItems.size()));
         });
 
         builder.setView(view);
         return builder.create();
     }
 
-    private void applyEmptyState(ListView listCalls, ListView listCalled, TextView tvEmpty,
+    private void applyEmptyState(ListView listCalls, ListView listCalled, LinearLayout layoutEmpty,
                                  List<XRefItem> items, boolean isCalls) {
         boolean empty = items == null || items.isEmpty();
         if (isCalls) {
@@ -169,8 +181,11 @@ public class XRefDialog extends DialogFragment {
             listCalled.setVisibility(empty ? View.GONE : View.VISIBLE);
             listCalls.setVisibility(View.GONE);
         }
-        tvEmpty.setVisibility(empty ? View.VISIBLE : View.GONE);
-        tvEmpty.setText(isCalls ? "该函数未调用任何其他函数" : "没有函数调用此函数");
+        layoutEmpty.setVisibility(empty ? View.VISIBLE : View.GONE);
+        TextView tvEmpty = layoutEmpty.findViewById(R.id.tv_empty);
+        if (tvEmpty != null) {
+            tvEmpty.setText(isCalls ? "该函数未调用任何其他函数" : "没有函数调用此函数");
+        }
     }
 
     @Override
@@ -205,21 +220,25 @@ public class XRefDialog extends DialogFragment {
         }
     }
 
-    private void updateTabState(Button btnCalls, Button btnCalled, boolean showCalls) {
-        // 检测夜间模式
-        int nightMode = getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
-        boolean isNight = nightMode == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+    private void updateTabState(MaterialButton btnCalls, MaterialButton btnCalled, boolean showCalls) {
+        // 使用 MaterialButton 的样式属性
+        if (showCalls) {
+            btnCalls.setStrokeColor(getResources().getColorStateList(R.color.tab_selected_stroke));
+            btnCalls.setBackgroundTintList(getResources().getColorStateList(R.color.tab_selected_bg));
+            btnCalls.setTextColor(getResources().getColor(R.color.tab_selected_text));
 
-        // 夜间模式使用柔和的颜色
-        int selectedBg = isNight ? 0xFF1565C0 : 0xFF1976D2;  // 深蓝/亮蓝
-        int selectedText = 0xFFFFFFFF;  // 白色文字
-        int normalBg = isNight ? 0xFF424242 : 0xFFE0E0E0;   // 深灰/浅灰
-        int normalText = isNight ? 0xFFFFFFFF : 0xFF222222; // 白色/深灰
+            btnCalled.setStrokeColor(getResources().getColorStateList(R.color.tab_normal_stroke));
+            btnCalled.setBackgroundTintList(getResources().getColorStateList(R.color.tab_normal_bg));
+            btnCalled.setTextColor(getResources().getColor(R.color.tab_normal_text));
+        } else {
+            btnCalls.setStrokeColor(getResources().getColorStateList(R.color.tab_normal_stroke));
+            btnCalls.setBackgroundTintList(getResources().getColorStateList(R.color.tab_normal_bg));
+            btnCalls.setTextColor(getResources().getColor(R.color.tab_normal_text));
 
-        btnCalls.setBackgroundColor(showCalls ? selectedBg : normalBg);
-        btnCalls.setTextColor(showCalls ? selectedText : normalText);
-        btnCalled.setBackgroundColor(showCalls ? normalBg : selectedBg);
-        btnCalled.setTextColor(showCalls ? normalText : selectedText);
+            btnCalled.setStrokeColor(getResources().getColorStateList(R.color.tab_selected_stroke));
+            btnCalled.setBackgroundTintList(getResources().getColorStateList(R.color.tab_selected_bg));
+            btnCalled.setTextColor(getResources().getColor(R.color.tab_selected_text));
+        }
     }
 
     private static class XRefItem {
@@ -247,11 +266,17 @@ public class XRefDialog extends DialogFragment {
             }
             TextView tvFuncName = view.findViewById(R.id.tv_func_name);
             TextView tvFuncOffset = view.findViewById(R.id.tv_func_offset);
+            TextView tvInstruction = view.findViewById(R.id.tv_instruction);
 
             XRefItem item = getItem(position);
             if (item != null) {
                 tvFuncName.setText(item.funcName);
-                tvFuncOffset.setText(String.format("偏移 0x%X", item.funcOffset));
+                tvFuncOffset.setText(String.format("0x%X", item.funcOffset));
+                if (tvInstruction != null && item.instrOffset != 0) {
+                    tvInstruction.setText(String.format("BL 0x%X", item.instrOffset));
+                } else if (tvInstruction != null) {
+                    tvInstruction.setText("");
+                }
             }
             return view;
         }

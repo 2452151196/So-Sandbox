@@ -1,6 +1,26 @@
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.github.megatronking.stringfog:gradle-plugin:5.2.0")
+    }
+}
+
 plugins {
     alias(libs.plugins.android.application)
 }
+
+apply(plugin = "stringfog")
+
+configure<com.github.megatronking.stringfog.plugin.StringFogExtension> {
+    implementation = "com.github.megatronking.stringfog.xor.StringFogImpl"
+    enable = true
+    mode = com.github.megatronking.stringfog.plugin.StringFogMode.base64
+    kg = com.github.megatronking.stringfog.plugin.kg.RandomKeyGenerator()
+}
+
+
 
 android {
     namespace = "com.example.anative"
@@ -10,25 +30,31 @@ android {
         applicationId = "com.example.anative"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 5
+        versionName = "1.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
-            abiFilters += "arm64-v8a"
+            abiFilters += listOf("arm64-v8a")
         }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
+        debug {
+            isMinifyEnabled = false
+            isShrinkResources = false
+        }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -41,6 +67,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 }
 
@@ -56,6 +83,9 @@ dependencies {
 
     // CardView
     implementation("androidx.cardview:cardview:1.0.0")
+
+    // StringFog XOR 加密实现（运行时解密用）
+    implementation("com.github.megatronking.stringfog:xor:5.0.0")
 
     implementation(libs.appcompat)
     implementation(libs.material)

@@ -14,6 +14,15 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+// 平台检测：动态执行仅在 ARM64 真机支持
+#if defined(__aarch64__) || defined(__arm64__)
+    #define PLATFORM_SUPPORTS_EXECUTION 1
+    #define PLATFORM_NAME "ARM64"
+#else
+    #define PLATFORM_SUPPORTS_EXECUTION 0
+    #define PLATFORM_NAME "X86/Other"
+#endif
+
 // ============================================================================
 // 崩溃保护：sigsetjmp / siglongjmp
 // ============================================================================
@@ -210,9 +219,10 @@ typedef struct {
 static CapturedRegistration g_captured[MAX_CAPTURED];
 static int g_captured_count = 0;
 
-// 原始RegisterNatives指针
+// 原始RegisterNatives指针与hook偏移（供unhook恢复用）
 typedef jint (*RegisterNatives_t)(JNIEnv*, jclass, const JNINativeMethod*, jint);
 static RegisterNatives_t g_orig_RegisterNatives = NULL;
+static size_t g_reg_hook_offset = 0;
 
 // 前向声明（hook_FindClass用到的原始指针）
 typedef jclass (*FindClass_t)(JNIEnv*, const char*);
@@ -271,9 +281,7 @@ static jint hook_RegisterNatives(JNIEnv *env, jclass clazz, const JNINativeMetho
         LOGI("  Captured: %s.%s %s @ %p", className, methods[i].name, methods[i].signature, methods[i].fnPtr);
     }
 
-    // 只捕获数据，不转发给真正的RegisterNatives
-    // 避免真正注册时触发FindClass等副作用导致无限循环
-    LOGI("  -> captured %d methods, not forwarding", nMethods);
+    // 不转发：仅捕获，调用结束后 Java 层立即调用 unhookRegisterNatives
     return 0;
 }
 
@@ -694,9 +702,10 @@ Java_com_example_anative_core_NativeInvoker_hookRegisterNatives(JNIEnv *env, jcl
     // 保存原始RegisterNatives
     g_orig_RegisterNatives = (*env)->RegisterNatives;
 
-    // 计算RegisterNatives在函数表中的偏移
+    // 计算RegisterNatives在函数表中的偏移（同时保存供unhook使用）
     const void *table_base = (const void *)(*env);
     size_t offset = (const char *)&((*env)->RegisterNatives) - (const char *)table_base;
+    g_reg_hook_offset = offset;
     void *target = (char *)(*(void **)env) + offset;
 
     // 函数表可能在只读内存页，需要先用mprotect修改权限
@@ -715,6 +724,26 @@ Java_com_example_anative_core_NativeInvoker_hookRegisterNatives(JNIEnv *env, jcl
 
     LOGI("RegisterNatives hooked via JNIEnv table (offset=%zu)", offset);
     return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_example_anative_core_NativeInvoker_unhookRegisterNatives(JNIEnv *env, jclass clazz) {
+    if (!g_orig_RegisterNatives || g_reg_hook_offset == 0) {
+        LOGI("unhookRegisterNatives: not hooked, skip");
+        return;
+    }
+    void *target = (char *)(*(void **)env) + g_reg_hook_offset;
+    long page_size = sysconf(_SC_PAGESIZE);
+    void *page_start = (void *)((uintptr_t)target & ~(page_size - 1));
+    if (mprotect(page_start, page_size * 2, PROT_READ | PROT_WRITE) != 0) {
+        LOGE("unhook mprotect failed");
+        return;
+    }
+    memcpy(target, &g_orig_RegisterNatives, sizeof(g_orig_RegisterNatives));
+    mprotect(page_start, page_size * 2, PROT_READ);
+    g_orig_RegisterNatives = NULL;
+    g_reg_hook_offset = 0;
+    LOGI("RegisterNatives unhooked, WebView safe");
 }
 
 JNIEXPORT jstring JNICALL
@@ -748,18 +777,51 @@ Java_com_example_anative_core_NativeInvoker_clearCapturedRegistrations(JNIEnv *e
 // ============================================================================
 
 JNIEXPORT jstring JNICALL
-Java_com_example_anative_core_NativeInvoker_callJniOnLoad(JNIEnv *env, jclass clazz, jlong handle) {
+Java_com_example_anative_core_NativeInvoker_callJniOnLoad(JNIEnv *env, jclass clazz,
+                                                           jlong handle, jstring jSymbol,
+                                                           jstring jMaxCapture, jstring jPageSize) {
+#if !PLATFORM_SUPPORTS_EXECUTION
+    return (*env)->NewStringUTF(env, "ERR: JNI_OnLoad 执行仅在 ARM64 真机支持，当前平台 (" PLATFORM_NAME ") 仅支持静态分析");
+#endif
+
     if (handle == 0) {
         return (*env)->NewStringUTF(env, "ERR:handle is null");
     }
 
+    // 直接使用云端解密后的字符串
+    char symbol[32] = {0};
+    if (jSymbol) {
+        const char *sym = (*env)->GetStringUTFChars(env, jSymbol, NULL);
+        strncpy(symbol, sym, 31);
+        (*env)->ReleaseStringUTFChars(env, jSymbol, sym);
+    } else {
+        // 没有云端数据，自然失败
+        return (*env)->NewStringUTF(env, "ERR:missing cloud data");
+    }
+
     // 查找 JNI_OnLoad
     typedef jint (*JNI_OnLoad_t)(JavaVM*, void*);
-    JNI_OnLoad_t onload = (JNI_OnLoad_t)dlsym((void*)(uintptr_t)handle, "JNI_OnLoad");
+    JNI_OnLoad_t onload = (JNI_OnLoad_t)dlsym((void*)(uintptr_t)handle, symbol);
 
     if (!onload) {
         LOGI("No JNI_OnLoad found in target SO");
         return (*env)->NewStringUTF(env, "ERR:JNI_OnLoad not found in this SO");
+    }
+
+    // 使用云端配置的MAX_CAPTURED大小
+    int max_capture = 256;  // 默认值
+    if (jMaxCapture) {
+        const char *cap = (*env)->GetStringUTFChars(env, jMaxCapture, NULL);
+        max_capture = atoi(cap);
+        (*env)->ReleaseStringUTFChars(env, jMaxCapture, cap);
+    }
+
+    // 使用云端配置的page_size
+    long page_size = 4096;  // 默认值
+    if (jPageSize) {
+        const char *ps = (*env)->GetStringUTFChars(env, jPageSize, NULL);
+        page_size = atol(ps);
+        (*env)->ReleaseStringUTFChars(env, jPageSize, ps);
     }
 
     LOGI("Found JNI_OnLoad at %p, calling...", onload);
@@ -851,6 +913,10 @@ JNIEXPORT jstring JNICALL
 Java_com_example_anative_core_NativeInvoker_callCapturedNative(
         JNIEnv *env, jclass clazz,
         jint index, jobjectArray jParamValues) {
+
+#if !PLATFORM_SUPPORTS_EXECUTION
+    return (*env)->NewStringUTF(env, "ERR: 调用 native 函数仅在 ARM64 真机支持，当前平台 (" PLATFORM_NAME ") 仅支持静态分析");
+#endif
 
     char result[2048];
 

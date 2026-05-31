@@ -38,6 +38,11 @@ public class CodeLineAdapter extends RecyclerView.Adapter<CodeLineAdapter.LineVH
         void onFuncClick(String funcName);
     }
 
+    public interface OnLineLongClickListener {
+        /** 长按行时回调，offset = 该行的文件偏移 */
+        void onLineLongClick(long offset);
+    }
+
     /**
      * 点击指令/地址/寄存器/立即数时的回调
      * @param clickType 点击的元素类型
@@ -62,6 +67,9 @@ public class CodeLineAdapter extends RecyclerView.Adapter<CodeLineAdapter.LineVH
     private Set<String> funcNames;
     private OnLineClickListener listener;
     private OnElementClickListener elementListener;
+    private OnLineLongClickListener longClickListener;
+    private java.util.Set<Long> breakpointOffsets = new java.util.HashSet<>();
+    private long currentPcOffset = -1;
 
     // 存储修改的指令: key=offset, value=新的汇编指令字符串
     private java.util.Map<Long, String> modifiedInstructions = new java.util.HashMap<>();
@@ -134,6 +142,20 @@ public class CodeLineAdapter extends RecyclerView.Adapter<CodeLineAdapter.LineVH
         this.elementListener = l;
     }
 
+    public void setOnLineLongClickListener(OnLineLongClickListener l) {
+        this.longClickListener = l;
+    }
+
+    public void setBreakpointOffsets(java.util.Set<Long> offsets) {
+        this.breakpointOffsets = offsets != null ? offsets : new java.util.HashSet<>();
+        notifyDataSetChanged();
+    }
+
+    public void setCurrentPcOffset(long offset) {
+        this.currentPcOffset = offset;
+        notifyDataSetChanged();
+    }
+
     public void setModifiedInstructions(java.util.Map<Long, String> modified) {
         this.modifiedInstructions = modified != null ? new java.util.HashMap<>(modified) : new java.util.HashMap<>();
         notifyDataSetChanged();
@@ -158,6 +180,14 @@ public class CodeLineAdapter extends RecyclerView.Adapter<CodeLineAdapter.LineVH
         notifyDataSetChanged();
     }
 
+    public String getAllCode() {
+        StringBuilder sb = new StringBuilder();
+        for (String line : lines) {
+            sb.append(line).append("\n");
+        }
+        return sb.toString();
+    }
+
     @NonNull
     @Override
     public LineVH onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
@@ -178,10 +208,12 @@ public class CodeLineAdapter extends RecyclerView.Adapter<CodeLineAdapter.LineVH
 
     class LineVH extends RecyclerView.ViewHolder {
         final TextView tv;
+        final View bpIndicator;
 
         LineVH(View v) {
             super(v);
             tv = v.findViewById(R.id.tvLine);
+            bpIndicator = v.findViewById(R.id.viewBpIndicator);
             tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, fontSizeSp);
         }
 
@@ -503,6 +535,36 @@ public class CodeLineAdapter extends RecyclerView.Adapter<CodeLineAdapter.LineVH
 
             tv.setText(ss);
             tv.setMovementMethod(hasClickable ? LinkMovementMethod.getInstance() : null);
+
+            // 断点红点指示器
+            if (bpIndicator != null) {
+                if (fOffset >= 0 && breakpointOffsets.contains(fOffset)) {
+                    bpIndicator.setVisibility(View.VISIBLE);
+                    bpIndicator.setBackgroundResource(R.drawable.bp_dot);
+                } else {
+                    bpIndicator.setVisibility(View.GONE);
+                }
+            }
+
+            // 当前 PC 行背景高亮
+            if (fOffset >= 0 && fOffset == currentPcOffset) {
+                itemView.setBackgroundColor(0x3000BCD4);
+            } else {
+                itemView.setBackgroundColor(0x00000000);
+            }
+
+            // 长按切换断点
+            if (fOffset >= 0) {
+                itemView.setOnLongClickListener(view -> {
+                    if (longClickListener != null) {
+                        longClickListener.onLineLongClick(fOffset);
+                        return true;
+                    }
+                    return false;
+                });
+            } else {
+                itemView.setOnLongClickListener(null);
+            }
         }
     }
 }

@@ -82,6 +82,18 @@ public class DataHolder {
     }
 
     public void setSoPath(String soPath) {
+        if (soPath == null || soPath.trim().isEmpty()) {
+            return;
+        }
+        // 先卸载旧SO
+        if (this.dlopenHandle != 0) {
+            try {
+                com.example.anative.core.NativeInvoker.nativeDlclose(this.dlopenHandle);
+            } catch (Exception e) {
+                // 忽略dlclose错误
+            }
+        }
+        
         this.soPath = soPath;
         // 切换SO文件时清除所有旧缓存
         this.xrefScanner = null;
@@ -90,6 +102,9 @@ public class DataHolder {
         this.strings = null;
         this.pltEntries = null;
         this.sections = null;
+        // 清除dlopen句柄和基址，避免JNI_OnLoad重复调用
+        this.dlopenHandle = 0;
+        this.baseAddress = 0;
     }
 
     public String getSoPath() {
@@ -145,6 +160,10 @@ public class DataHolder {
 
     public void clearUnsavedChanges() {
         hasUnsavedChanges = false;
+    }
+
+    public void markFileModified() {
+        hasUnsavedChanges = true;
     }
 
     public int getModifiedCount() {

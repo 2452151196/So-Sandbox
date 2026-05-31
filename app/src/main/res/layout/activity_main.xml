@@ -45,7 +45,7 @@
                     android:id="@+id/btn_select_so"
                     android:layout_width="match_parent"
                     android:layout_height="64dp"
-                    android:text="打开 SO / DEX 文件"
+                    android:text="打开 SO 文件"
                     android:textAllCaps="false"
                     android:textSize="17sp"
                     android:textStyle="bold"

@@ -31,10 +31,12 @@ import androidx.viewpager2.widget.ViewPager2;
 import com.example.anative.R;
 import com.example.anative.core.DataHolder;
 import com.example.anative.core.ElfParser;
+import com.example.anative.core.LicenseManager;
 import com.example.anative.core.NativeFunction;
 import com.example.anative.core.NativeInvoker;
 import com.example.anative.core.PltEntry;
 import com.example.anative.core.XRefScanner;
+import com.example.anative.core.DebugSessionManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -132,6 +134,13 @@ public class AsmFragment extends Fragment {
         }
         codeAdapter.setOnLineClickListener(this::onFuncNameClicked);
         codeAdapter.setOnElementClickListener(this::onElementClicked);
+        codeAdapter.setOnLineLongClickListener(this::onLineLongClicked);
+
+        // 如果调试会话已激活，同步断点状态
+        DebugSessionManager dbg = DebugSessionManager.getInstance();
+        if (dbg.isActive()) {
+            codeAdapter.setBreakpointOffsets(dbg.getBreakpointOffsets());
+        }
 
         LinearLayoutManager layoutManager = new LinearLayoutManager(requireContext());
         rvCode.setLayoutManager(layoutManager);
@@ -244,6 +253,29 @@ public class AsmFragment extends Fragment {
             } catch (NumberFormatException ignored) {
             }
         }
+    }
+
+    private void onLineLongClicked(long offset) {
+        if (getContext() == null) return;
+        DebugSessionManager dbg = DebugSessionManager.getInstance();
+        if (!dbg.isActive()) {
+            // 如果调试未激活，弹出提示：先启动调试
+            Toast.makeText(requireContext(), "请先启动动态调试（菜单→动态调试→Spawn调试）", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        executor.execute(() -> {
+            boolean set = dbg.toggleBreakpoint(offset);
+            handler.post(() -> {
+                if (set) {
+                    Toast.makeText(requireContext(),
+                            String.format("断点已设置 @ 0x%X", offset), Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(requireContext(),
+                            String.format("断点已移除 @ 0x%X", offset), Toast.LENGTH_SHORT).show();
+                }
+                codeAdapter.setBreakpointOffsets(dbg.getBreakpointOffsets());
+            });
+        });
     }
 
     private void onElementClicked(CodeLineAdapter.ClickType clickType, String line, long offset,
@@ -514,6 +546,25 @@ public class AsmFragment extends Fragment {
         }
     }
 
+    public void setBreakpointOffsets(java.util.Set<Long> offsets) {
+        if (codeAdapter != null) {
+            codeAdapter.setBreakpointOffsets(offsets);
+        }
+    }
+
+    public void setCurrentPcOffset(long offset) {
+        if (codeAdapter != null) {
+            codeAdapter.setCurrentPcOffset(offset);
+        }
+    }
+
+    public String getAllCode() {
+        if (codeAdapter != null) {
+            return codeAdapter.getAllCode();
+        }
+        return null;
+    }
+
     private void patchInstruction(long offset, String assembly) {
         String soPath = DataHolder.getInstance().getSoPath();
 
@@ -546,7 +597,7 @@ public class AsmFragment extends Fragment {
                 handler.post(() -> {
                     pd.dismiss();
                     Toast.makeText(requireContext(), "已写入当前文件", Toast.LENGTH_SHORT).show();
-                    DataHolder.getInstance().clearUnsavedChanges();
+                    DataHolder.getInstance().markFileModified();
                     updateDisplay();
                 });
             } catch (Exception e) {
@@ -613,7 +664,7 @@ public class AsmFragment extends Fragment {
         if (getContext() == null) return;
         new AlertDialog.Builder(requireContext())
                 .setTitle(func.getDemangledName())
-                .setItems(new String[]{"跳转到函数", "查找交叉引用"}, (dialog, which) -> {
+                .setItems(new String[]{"跳转到函数", "查看交叉引用"}, (dialog, which) -> {
                     if (which == 0) {
                         navigateToFunction(func);
                     } else {
@@ -647,8 +698,7 @@ public class AsmFragment extends Fragment {
             List<XRefScanner.CallRef> callers = scanner.getCallersOf(func.getOffset());
             List<XRefScanner.CallRef> callees = scanner.getCalleesOf(func.getOffset());
 
-            // 合成函数 (sub_XXXX) 的精确起止是未知的，用地址范围找 callees
-            boolean isSynthetic = "disasm_synthetic".equals(func.getSource())
+            boolean isSynthetic = "plt".equals(func.getSource())
                     || "discovered".equals(func.getSource())
                     || "text_scan".equals(func.getSource())
                     || "init_array".equals(func.getSource())
@@ -657,7 +707,9 @@ public class AsmFragment extends Fragment {
                 long size = func.getSize() > 0 ? func.getSize() : estimateSyntheticFunctionSize(func.getOffset());
                 List<XRefScanner.CallRef> ranged = scanner.getCalleesInRange(
                         func.getOffset(), func.getOffset() + size);
-                if (!ranged.isEmpty()) callees = ranged;
+                if (!ranged.isEmpty()) {
+                    callees = ranged;
+                }
             }
 
             final List<XRefScanner.CallRef> finalCallees = callees;
@@ -696,7 +748,6 @@ public class AsmFragment extends Fragment {
                                       List<XRefScanner.CallRef> callers,
                                       List<XRefScanner.CallRef> callees) {
         if (getContext() == null) return;
-
         long baseAddress = DataHolder.getInstance().getBaseAddress();
         XRefDialog dialog = XRefDialog.newScannerInstance(func, callers, callees, baseAddress);
         dialog.show(getChildFragmentManager(), "xrefs");

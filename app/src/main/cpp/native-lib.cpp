@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <cstring>
 #include <array>
+#include <android/log.h>
 
 // --- 字符串混淆模块 ---
 namespace O {
@@ -39,7 +40,7 @@ namespace O {
 namespace C {
     std::string a() {
         // 保留原有逻辑：XOR 解密预设哈希
-        const char* h = "8C3BE50AB290D439DA436D255E02271D9ED73930C80F5EBEA98741AC81CDCA52";
+        const char* h = "2359285182393755D3DF118CD0DA9BED11AAF6C608ED3381E020D8634C6CE022";
         constexpr char k = 'G';
         // 使用 uint8_t 避免 narrowing 编译错误
         std::array<uint8_t, 65> e = {};
@@ -174,7 +175,589 @@ namespace I {
 }
 
 // --- 入口 ---
-__attribute__((constructor, visibility("hidden")))
-static void _e() {
-    I::v();
+
+
+// =============================================================================
+// C层AES解密 - 使用 mbedTLS 实现
+// =============================================================================
+#include <mbedtls/aes.h>
+#include <mbedtls/md.h>
+#include <mbedtls/pkcs5.h>
+#include <mbedtls/base64.h>
+
+// Capstone 反汇编（用于流程图生成）
+#include <capstone/capstone.h>
+#include <vector>
+#include <map>
+#include <set>
+#include <sstream>
+#include <iomanip>
+
+namespace Crypto {
+    // Base64解码
+    static std::string base64Decode(const std::string& input) {
+        size_t outLen = 0;
+        mbedtls_base64_decode(nullptr, 0, &outLen, (const unsigned char*)input.c_str(), input.length());
+        
+        std::string output(outLen, '\0');
+        int ret = mbedtls_base64_decode((unsigned char*)output.data(), output.length(), &outLen, 
+                                        (const unsigned char*)input.c_str(), input.length());
+        if (ret != 0) return "";
+        
+        output.resize(outLen);
+        return output;
+    }
+
+    // bytes转hex
+    static std::string bytesToHex(const uint8_t* data, size_t len) {
+        static const char hex[] = "0123456789abcdef";
+        std::string result;
+        for (size_t i = 0; i < len; i++) {
+            result.push_back(hex[(data[i] >> 4) & 0xF]);
+            result.push_back(hex[data[i] & 0xF]);
+        }
+        return result;
+    }
+
+    // PBKDF2-HMAC-SHA256派生密钥 (mbedTLS 2.28.8 API)
+    static std::vector<uint8_t> pbkdf2HmacSha256(const std::string& password, 
+                                                  const uint8_t* salt, size_t saltLen,
+                                                  int iterations, size_t keyLen) {
+        std::vector<uint8_t> key(keyLen);
+        
+        // 初始化 MD 上下文
+        mbedtls_md_context_t md_ctx;
+        mbedtls_md_init(&md_ctx);
+        
+        const mbedtls_md_info_t* md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+        int ret = mbedtls_md_setup(&md_ctx, md_info, 1); // 1 = HMAC
+        if (ret != 0) {
+            mbedtls_md_free(&md_ctx);
+            return {};
+        }
+        
+        ret = mbedtls_pkcs5_pbkdf2_hmac(&md_ctx,
+                                        (const unsigned char*)password.c_str(), password.length(),
+                                        salt, saltLen, iterations, keyLen, key.data());
+        mbedtls_md_free(&md_ctx);
+        
+        if (ret != 0) {
+            return {};
+        }
+        return key;
+    }
+
+    // AES-256-CBC解密
+    static std::string aesDecrypt(const std::string& encryptedB64, const std::string& key) {
+        // Base64解码
+        std::string combined = base64Decode(encryptedB64);
+        if (combined.length() < 24) return "";
+
+        // 提取：salt(8) + iv(16) + ciphertext
+        uint8_t salt[8];
+        uint8_t iv[16];
+        memcpy(salt, combined.data(), 8);
+        memcpy(iv, combined.data() + 8, 16);
+        std::string ciphertext = combined.substr(24);
+
+        // 派生密钥：PBKDF2(key + saltHex, salt, 10000, 256bit)
+        std::string keySalt = key + bytesToHex(salt, 8);
+        std::vector<uint8_t> derivedKey = pbkdf2HmacSha256(keySalt, salt, 8, 10000, 32);
+        if (derivedKey.empty()) return "";
+
+        // AES-256-CBC解密
+        mbedtls_aes_context aes_ctx;
+        mbedtls_aes_setkey_dec(&aes_ctx, derivedKey.data(), 256);
+
+        std::vector<uint8_t> plaintext(ciphertext.length());
+        size_t nc_off = 0;
+        uint8_t stream_block[16];
+        
+        int ret = mbedtls_aes_crypt_cbc(&aes_ctx, MBEDTLS_AES_DECRYPT, 
+                                        ciphertext.length(), iv,
+                                        (const unsigned char*)ciphertext.data(),
+                                        plaintext.data());
+        if (ret != 0) return "";
+
+        // 去除PKCS7填充
+        size_t padLen = plaintext.empty() ? 0 : plaintext.back();
+        if (padLen > 0 && padLen <= 16) {
+            bool validPadding = true;
+            for (size_t i = 0; i < padLen; i++) {
+                if (plaintext[plaintext.size() - 1 - i] != padLen) {
+                    validPadding = false;
+                    break;
+                }
+            }
+            if (validPadding) {
+                plaintext.resize(plaintext.size() - padLen);
+            }
+        }
+
+        return std::string((char*)plaintext.data(), plaintext.size());
+    }
+}
+
+// 声明外部函数（来自 crash_protection.c 和 invoker.c）
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_anative_core_NativeInvoker_hookRegisterNatives(JNIEnv* env, jclass clazz);
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_anative_core_NativeInvoker_unhookRegisterNatives(JNIEnv* env, jclass clazz);
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_example_anative_core_NativeInvoker_getCapturedRegistrations(JNIEnv* env, jclass clazz);
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_example_anative_core_NativeInvoker_callJniOnLoad(JNIEnv* env, jclass clazz,
+                                                           jlong handle, jstring jSymbol,
+                                                           jstring jMaxCapture, jstring jPageSize);
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_example_anative_ui_RegisterNativesActivity_executeCloudHookNative(
+    JNIEnv* env, jclass clazz, jlong handle, 
+    jstring encryptedSymbol, jstring encryptedMaxCapture, jstring encryptedPageSize,
+    jstring deviceFingerprint) {
+    
+    if (!encryptedSymbol || !encryptedMaxCapture || !encryptedPageSize || !deviceFingerprint) {
+        return nullptr;
+    }
+
+    // 获取加密数据和密钥
+    const char* symEnc = env->GetStringUTFChars(encryptedSymbol, nullptr);
+    const char* maxEnc = env->GetStringUTFChars(encryptedMaxCapture, nullptr);
+    const char* pageEnc = env->GetStringUTFChars(encryptedPageSize, nullptr);
+    const char* fp = env->GetStringUTFChars(deviceFingerprint, nullptr);
+
+    // C层解密
+    std::string symbol = Crypto::aesDecrypt(symEnc, fp);
+    std::string maxCapture = Crypto::aesDecrypt(maxEnc, fp);
+    std::string pageSize = Crypto::aesDecrypt(pageEnc, fp);
+
+    env->ReleaseStringUTFChars(encryptedSymbol, symEnc);
+    env->ReleaseStringUTFChars(encryptedMaxCapture, maxEnc);
+    env->ReleaseStringUTFChars(encryptedPageSize, pageEnc);
+    env->ReleaseStringUTFChars(deviceFingerprint, fp);
+
+    // 检查解密结果
+    if (symbol.empty() || maxCapture.empty() || pageSize.empty()) {
+        __android_log_print(ANDROID_LOG_ERROR, "DTZC-Native", "Decryption failed");
+        return nullptr;
+    }
+
+    __android_log_print(ANDROID_LOG_DEBUG, "DTZC-Native", 
+                       "Decrypted symbol=%s, maxCapture=%s, pageSize=%s",
+                       symbol.c_str(), maxCapture.c_str(), pageSize.c_str());
+
+    // C层执行完整Hook流程（密钥和数据都在so中，最安全）
+    __android_log_print(ANDROID_LOG_INFO, "DTZC-Native", "C层执行Hook流程...");
+    
+    // 1. 安装Hook
+    Java_com_example_anative_core_NativeInvoker_hookRegisterNatives(env, clazz);
+    
+    // 2. 调用目标SO的JNI_OnLoad（传入解密后的明文）
+    jstring jSymbol = env->NewStringUTF(symbol.c_str());
+    jstring jMaxCapture = env->NewStringUTF(maxCapture.c_str());
+    jstring jPageSize = env->NewStringUTF(pageSize.c_str());
+    
+    jstring onloadResult = Java_com_example_anative_core_NativeInvoker_callJniOnLoad(
+        env, clazz, handle, jSymbol, jMaxCapture, jPageSize);
+    
+    env->DeleteLocalRef(jSymbol);
+    env->DeleteLocalRef(jMaxCapture);
+    env->DeleteLocalRef(jPageSize);
+    
+    // 3. 卸载Hook
+    Java_com_example_anative_core_NativeInvoker_unhookRegisterNatives(env, clazz);
+    
+    // 4. 获取捕获的注册数据
+    jstring captured = Java_com_example_anative_core_NativeInvoker_getCapturedRegistrations(env, clazz);
+    
+    __android_log_print(ANDROID_LOG_INFO, "DTZC-Native", "Hook流程完成");
+    
+    // 返回捕获的注册数据（字符串格式）
+    return captured;
+}
+
+// ============================================================================
+// C层流程图生成（安全：加密配置解密+Capstone分析都在so中完成）
+// ============================================================================
+
+struct FlowchartNode {
+    uint64_t addr;
+    std::vector<uint8_t> bytes;
+    std::string disasm;
+    std::vector<uint64_t> successors;
+    bool isBranch;
+    bool isCondBranch;
+};
+
+static bool hasMnemonic(const std::vector<std::string>& insns, const std::string& mnemonic) {
+    for (const auto& insn : insns) {
+        if (mnemonic == insn) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint64_t extractBranchTargetFromDisasm(const std::string& disasm) {
+    size_t addrPos = disasm.find("0x");
+    if (addrPos == std::string::npos) {
+        return 0;
+    }
+    return strtoull(disasm.c_str() + addrPos, nullptr, 16);
+}
+
+static std::vector<std::string> parseBranchInsns(const std::string& config) {
+    std::vector<std::string> insns;
+    // 解析 branch_insns 数组
+    size_t start = config.find("\"branch_insns\"");
+    if (start != std::string::npos) {
+        start = config.find("[", start);
+        size_t end = config.find("]", start);
+        if (start != std::string::npos && end != std::string::npos) {
+            std::string arr = config.substr(start + 1, end - start - 1);
+            size_t pos = 0;
+            while ((pos = arr.find("\"", pos)) != std::string::npos) {
+                size_t endQuote = arr.find("\"", pos + 1);
+                if (endQuote != std::string::npos) {
+                    insns.push_back(arr.substr(pos + 1, endQuote - pos - 1));
+                    pos = endQuote + 1;
+                } else break;
+            }
+        }
+    }
+    return insns;
+}
+
+static std::vector<std::string> parseCondBranchInsns(const std::string& config) {
+    std::vector<std::string> insns;
+    // 解析 cond_branch_insns 数组
+    size_t start = config.find("\"cond_branch_insns\"");
+    if (start != std::string::npos) {
+        start = config.find("[", start);
+        size_t end = config.find("]", start);
+        if (start != std::string::npos && end != std::string::npos) {
+            std::string arr = config.substr(start + 1, end - start - 1);
+            size_t pos = 0;
+            while ((pos = arr.find("\"", pos)) != std::string::npos) {
+                size_t endQuote = arr.find("\"", pos + 1);
+                if (endQuote != std::string::npos) {
+                    insns.push_back(arr.substr(pos + 1, endQuote - pos - 1));
+                    pos = endQuote + 1;
+                } else break;
+            }
+        }
+    }
+    return insns;
+}
+
+static std::string generateFlowchartJson(const std::vector<FlowchartNode>& nodes, uint64_t baseAddress) {
+    std::ostringstream json;
+    json << "{";
+    json << "\"nodes\":";
+    json << "[";
+    for (size_t i = 0; i < nodes.size(); i++) {
+        const auto& node = nodes[i];
+        if (i > 0) json << ",";
+        json << "{";
+        uint64_t offset = node.addr - baseAddress;
+        json << "\"id\":" << std::dec << offset << ",";
+        // 地址格式化为十六进制字符串
+        std::ostringstream addrStream;
+        addrStream << "0x" << std::hex << offset;
+        json << "\"address\":\"" << addrStream.str() << "\",";
+        json << "\"disasm\":\"";
+        // 转义特殊字符
+        for (char c : node.disasm) {
+            switch (c) {
+                case '"': json << "\\\""; break;
+                case '\\': json << "\\\\"; break;
+                case '\b': json << "\\b"; break;
+                case '\f': json << "\\f"; break;
+                case '\n': json << "\\n"; break;
+                case '\r': json << "\\r"; break;
+                case '\t': json << "\\t"; break;
+                default:
+                    if (c >= 0x20 && c <= 0x7E) {
+                        json << c;
+                    } else {
+                        // 其他控制字符转义为 \u00XX
+                        char buf[7];
+                        snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                        json << buf;
+                    }
+            }
+        }
+        json << "\",";
+        json << "\"isBranch\":" << (node.isBranch ? "true" : "false") << ",";
+        json << "\"isCondBranch\":" << (node.isCondBranch ? "true" : "false") << ",";
+        json << "\"bytes\":\"";
+        for (auto b : node.bytes) {
+            json << std::hex << std::setfill('0') << std::setw(2) << (int)b;
+        }
+        json << std::dec; // 重置为十进制
+        json << "\"";
+        json << "}";
+    }
+    json << "],";
+    
+    // edges
+    json << "\"edges\":";
+    json << "[";
+    bool firstEdge = true;
+    for (const auto& node : nodes) {
+        uint64_t fromOffset = node.addr - baseAddress;
+        for (uint64_t succ : node.successors) {
+            uint64_t toOffset = succ - baseAddress;
+            if (!firstEdge) json << ",";
+            firstEdge = false;
+            json << "{";
+            json << "\"from\":" << std::dec << fromOffset << ",";
+            json << "\"to\":" << std::dec << toOffset;
+            json << "}";
+        }
+    }
+    json << "]";
+    json << "}";
+    return json.str();
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_example_anative_ui_FlowChartFragment_generateFlowchartNative(
+    JNIEnv* env, jclass clazz,
+    jstring encryptedConfig,
+    jstring deviceFingerprint,
+    jbyteArray funcBytes,
+    jlong funcAddr,
+    jlong baseAddress,
+    jlong funcSize) {
+    
+    if (!encryptedConfig || !deviceFingerprint || !funcBytes) {
+        return nullptr;
+    }
+
+    // 获取加密配置和密钥
+    const char* encConfig = env->GetStringUTFChars(encryptedConfig, nullptr);
+    const char* fp = env->GetStringUTFChars(deviceFingerprint, nullptr);
+
+    std::string encConfigStr = encConfig ? encConfig : "";
+    std::string fingerprintStr = fp ? fp : "";
+
+    // 获取函数字节码
+    jsize bytesLen = env->GetArrayLength(funcBytes);
+    jbyte* bytesPtr = env->GetByteArrayElements(funcBytes, nullptr);
+    std::vector<uint8_t> code(bytesPtr, bytesPtr + bytesLen);
+    env->ReleaseByteArrayElements(funcBytes, bytesPtr, JNI_ABORT);
+
+    // C层解密配置
+    std::string config = Crypto::aesDecrypt(encConfigStr, fingerprintStr);
+    
+    env->ReleaseStringUTFChars(encryptedConfig, encConfig);
+    env->ReleaseStringUTFChars(deviceFingerprint, fp);
+
+    if (config.empty()) {
+        __android_log_print(ANDROID_LOG_ERROR, "FlowChart-Native", "Config decryption failed");
+        return nullptr;
+    }
+
+    __android_log_print(ANDROID_LOG_DEBUG, "FlowChart-Native", "Config decrypted (first 200 chars): %.200s", config.c_str());
+
+    // 解析分支指令配置
+    std::vector<std::string> branchInsns = parseBranchInsns(config);
+    std::vector<std::string> condBranchInsns = parseCondBranchInsns(config);
+    
+    // 配置解析失败，直接报错（网络获取失败或未授权）
+    if (branchInsns.empty() || condBranchInsns.empty()) {
+        __android_log_print(ANDROID_LOG_ERROR, "FlowChart-Native", "Config parsing failed: branchInsns=%zu, condBranchInsns=%zu", branchInsns.size(), condBranchInsns.size());
+        return nullptr;
+    }
+    
+    __android_log_print(ANDROID_LOG_INFO, "FlowChart-Native", 
+                       "Branch insns: %zu, Cond branch: %zu, Code size: %zu", 
+                       branchInsns.size(), condBranchInsns.size(), code.size());
+
+    // Capstone 反汇编
+    csh handle;
+    cs_insn* insn;
+    size_t count;
+
+    if (cs_open(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, &handle) != CS_ERR_OK) {
+        __android_log_print(ANDROID_LOG_ERROR, "FlowChart-Native", "Capstone init failed");
+        return nullptr;
+    }
+
+    cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+    count = cs_disasm(handle, code.data(), code.size(), funcAddr, 0, &insn);
+    
+    __android_log_print(ANDROID_LOG_DEBUG, "FlowChart-Native", "Disassembled %zu instructions, baseAddr=0x%lx", count, baseAddress);
+
+    if (count == 0) {
+        __android_log_print(ANDROID_LOG_ERROR, "FlowChart-Native", "Disassembly failed");
+        cs_close(&handle);
+        return nullptr;
+    }
+
+    std::set<uint64_t> blockStarts;
+    std::vector<std::string> instrDisasm(count);
+    blockStarts.insert((uint64_t)funcAddr);
+
+    for (size_t i = 0; i < count; i++) {
+        std::string mnemonic = insn[i].mnemonic;
+        std::string fullDisasm = mnemonic;
+        if (insn[i].op_str[0]) {
+            fullDisasm += " ";
+            fullDisasm += insn[i].op_str;
+        }
+        instrDisasm[i] = fullDisasm;
+
+        if (hasMnemonic(branchInsns, mnemonic) && mnemonic != "bl" && mnemonic != "blr") {
+            uint64_t target = extractBranchTargetFromDisasm(fullDisasm);
+            if (target >= (uint64_t)funcAddr && target < (uint64_t)(funcAddr + funcSize)) {
+                blockStarts.insert(target);
+            }
+            if (hasMnemonic(condBranchInsns, mnemonic) && i + 1 < count) {
+                blockStarts.insert(insn[i + 1].address);
+            }
+        }
+    }
+
+    std::vector<FlowchartNode> nodes;
+    std::map<uint64_t, size_t> addrToNode;
+    FlowchartNode currentNode{};
+    bool hasCurrentNode = false;
+
+    for (size_t i = 0; i < count; i++) {
+        uint64_t address = insn[i].address;
+        bool startNewBlock = !hasCurrentNode || blockStarts.count(address) > 0;
+        if (startNewBlock) {
+            if (hasCurrentNode) {
+                addrToNode[currentNode.addr] = nodes.size();
+                nodes.push_back(currentNode);
+            }
+            currentNode = FlowchartNode{};
+            currentNode.addr = address;
+            currentNode.isBranch = false;
+            currentNode.isCondBranch = false;
+            hasCurrentNode = true;
+        }
+
+        if (!currentNode.disasm.empty()) {
+            currentNode.disasm += "\n";
+        }
+        std::ostringstream line;
+        uint64_t offset = address - baseAddress;
+        line << std::hex << offset << ": " << instrDisasm[i];
+        currentNode.disasm += line.str();
+        currentNode.bytes.insert(currentNode.bytes.end(), insn[i].bytes, insn[i].bytes + insn[i].size);
+
+        std::string mnemonic = insn[i].mnemonic;
+        if (hasMnemonic(branchInsns, mnemonic)) {
+            currentNode.isBranch = true;
+            if (hasMnemonic(condBranchInsns, mnemonic)) {
+                currentNode.isCondBranch = true;
+            }
+        }
+
+        bool endsBlock = false;
+        if (i + 1 == count) {
+            endsBlock = true;
+        } else if (hasMnemonic(branchInsns, mnemonic) && mnemonic != "bl" && mnemonic != "blr") {
+            endsBlock = true;
+        } else if (blockStarts.count(insn[i + 1].address) > 0) {
+            endsBlock = true;
+        }
+
+        if (endsBlock) {
+            addrToNode[currentNode.addr] = nodes.size();
+            nodes.push_back(currentNode);
+            currentNode = FlowchartNode{};
+            hasCurrentNode = false;
+        }
+    }
+
+    cs_free(insn, count);
+    cs_close(&handle);
+
+    for (size_t i = 0; i < nodes.size(); i++) {
+        if (nodes[i].disasm.empty()) {
+            continue;
+        }
+
+        std::string lastLine = nodes[i].disasm;
+        size_t lastBreak = lastLine.rfind('\n');
+        if (lastBreak != std::string::npos) {
+            lastLine = lastLine.substr(lastBreak + 1);
+        }
+
+        size_t colonPos = lastLine.find(':');
+        std::string tail = colonPos == std::string::npos ? lastLine : lastLine.substr(colonPos + 1);
+        while (!tail.empty() && tail[0] == ' ') {
+            tail.erase(0, 1);
+        }
+        size_t sp = tail.find(' ');
+        std::string mnemonic = sp == std::string::npos ? tail : tail.substr(0, sp);
+
+        if (hasMnemonic(branchInsns, mnemonic)) {
+            uint64_t target = extractBranchTargetFromDisasm(tail);
+            if (mnemonic == "ret" || mnemonic == "br") {
+                continue;
+            }
+            if (mnemonic == "blr" || mnemonic == "bl") {
+                if (i + 1 < nodes.size()) {
+                    nodes[i].successors.push_back(nodes[i + 1].addr);
+                }
+                continue;
+            }
+            if (hasMnemonic(condBranchInsns, mnemonic)) {
+                if (target && addrToNode.count(target) > 0) {
+                    nodes[i].successors.push_back(target);
+                }
+                if (i + 1 < nodes.size()) {
+                    nodes[i].successors.push_back(nodes[i + 1].addr);
+                }
+                continue;
+            }
+            if (target && addrToNode.count(target) > 0) {
+                nodes[i].successors.push_back(target);
+            }
+            continue;
+        }
+
+        if (i + 1 < nodes.size()) {
+            nodes[i].successors.push_back(nodes[i + 1].addr);
+        }
+    }
+
+    // 替换所有disasm中的虚拟地址为偏移地址（仅用于显示）
+    for (auto& node : nodes) {
+        std::string& disasm = node.disasm;
+        size_t pos = 0;
+        while ((pos = disasm.find("0x", pos)) != std::string::npos) {
+            size_t endPos = pos + 2;
+            while (endPos < disasm.length() && isxdigit(disasm[endPos])) {
+                endPos++;
+            }
+            if (endPos > pos + 2) {
+                std::string addrStr = disasm.substr(pos, endPos - pos);
+                uint64_t va = strtoull(addrStr.c_str(), nullptr, 16);
+                if (va >= baseAddress && va < baseAddress + 0x10000000) {
+                    uint64_t off = va - baseAddress;
+                    std::ostringstream offStr;
+                    offStr << "0x" << std::hex << off;
+                    disasm.replace(pos, endPos - pos, offStr.str());
+                }
+            }
+            pos++;
+        }
+    }
+
+    // 生成JSON
+    std::string json = generateFlowchartJson(nodes, baseAddress);
+    
+    __android_log_print(ANDROID_LOG_INFO, "FlowChart-Native", 
+                       "Generated flowchart: %zu nodes", nodes.size());
+
+    return env->NewStringUTF(json.c_str());
 }

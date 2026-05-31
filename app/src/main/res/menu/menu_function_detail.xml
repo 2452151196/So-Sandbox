@@ -8,4 +8,19 @@
         android:icon="@drawable/file"
         app:showAsAction="always" />
 
+    <item
+        android:id="@+id/action_copy_all"
+        android:title="复制全部"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_debug"
+        android:title="动态调试"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_export"
+        android:title="导出当前页面"
+        app:showAsAction="never" />
+
 </menu>
