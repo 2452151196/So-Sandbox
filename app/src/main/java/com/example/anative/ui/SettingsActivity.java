@@ -328,21 +328,92 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     private void showCheckUpdateDialog() {
-        String message = "SoSandbox\n\n"
-            + "当前版本：v" + getAppVersionName() + "\n\n"
-            + "项目已完全离线开源，\n"
-            + "无需网络即可使用全部功能。\n"
-            + "后续更新随缘，欢迎社区贡献。\n\n"
-            + "开源地址：\n"
-            + "https://github.com/2452151196/So-Sandbox";
-        new AlertDialog.Builder(this)
-                .setTitle("更新信息")
-                .setMessage(message)
-                .setPositiveButton("确定", null)
-                .show();
+        String message = "当前版本：v" + getAppVersionName();
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("检测更新")
+                .setMessage("正在检测更新...")
+                .setNegativeButton("关闭", null);
+
+        if (UPDATE_URL == null || UPDATE_URL.trim().isEmpty()) {
+            builder.setMessage("暂未配置更新地址");
+            builder.setPositiveButton("知道了", (dialog, which) ->
+                    Toast.makeText(this, "暂未配置更新地址", Toast.LENGTH_SHORT).show());
+            builder.show();
+            return;
+        }
+
+        AlertDialog dialog = builder.show();
+
+        new Thread(() -> {
+            try {
+                java.net.URL url = new java.net.URL(UPDATE_URL);
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+                
+                java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(conn.getInputStream()));
+                StringBuilder response = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    response.append(line);
+                }
+                reader.close();
+                
+                org.json.JSONObject json = new org.json.JSONObject(response.toString());
+                String latestVersion = json.getString("tag_name").replace("v", "");
+                String releaseUrl = json.getString("html_url");
+                String releaseNotes = json.optString("body", "无更新说明");
+                
+                String currentVersion = getAppVersionName();
+                boolean hasUpdate = compareVersions(latestVersion, currentVersion) > 0;
+                
+                runOnUiThread(() -> {
+                    dialog.dismiss();
+                    if (hasUpdate) {
+                        new AlertDialog.Builder(this)
+                                .setTitle("发现新版本")
+                                .setMessage("当前版本：v" + currentVersion + "\n最新版本：v" + latestVersion + "\n\n" + releaseNotes)
+                                .setPositiveButton("前往更新", (d, w) -> openUrl(releaseUrl))
+                                .setNegativeButton("取消", null)
+                                .show();
+                    } else {
+                        new AlertDialog.Builder(this)
+                                .setTitle("已是最新版本")
+                                .setMessage("当前版本：v" + currentVersion + "\n\n无需更新")
+                                .setPositiveButton("确定", null)
+                                .show();
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    dialog.dismiss();
+                    new AlertDialog.Builder(this)
+                            .setTitle("检测失败")
+                            .setMessage("无法连接更新服务器\n" + e.getMessage())
+                            .setPositiveButton("确定", null)
+                            .show();
+                });
+            }
+        }).start();
     }
 
+    private int compareVersions(String v1, String v2) {
+        String[] parts1 = v1.split("\\.");
+        String[] parts2 = v2.split("\\.");
+        int length = Math.max(parts1.length, parts2.length);
+        for (int i = 0; i < length; i++) {
+            int n1 = i < parts1.length ? Integer.parseInt(parts1[i]) : 0;
+            int n2 = i < parts2.length ? Integer.parseInt(parts2[i]) : 0;
+            if (n1 != n2) {
+                return n1 - n2;
+            }
+        }
+        return 0;
+    }
     private void showAboutDialog() {
+
         String message = "应用名称：" + getString(R.string.app_name)
                 + "\n版本：v" + getAppVersionName()
                 + "\n\n这是一个 SO 文件逆向分析工具。\n\n项目已完全离线开源，无需网络即可使用全部功能。\n后续更新随缘。\n\n开源地址：\nhttps://github.com/2452151196/So-Sandbox";
@@ -352,6 +423,9 @@ public class SettingsActivity extends AppCompatActivity {
                 .setPositiveButton("确定", null)
                 .show();
     }
+    private void openUrl(String url) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
             startActivity(intent);
         } catch (Exception e) {
             Toast.makeText(this, "无法打开链接", Toast.LENGTH_SHORT).show();
