@@ -352,10 +352,6 @@ public class SettingsActivity extends AppCompatActivity {
                 .setPositiveButton("确定", null)
                 .show();
     }
-                .setPositiveButton("确定", null)
-                .show();
-    }
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
             startActivity(intent);
         } catch (Exception e) {
             Toast.makeText(this, "无法打开链接", Toast.LENGTH_SHORT).show();
