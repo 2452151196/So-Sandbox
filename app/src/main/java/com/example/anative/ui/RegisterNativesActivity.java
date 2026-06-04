@@ -94,11 +94,11 @@ public class RegisterNativesActivity extends AppCompatActivity {
         }
 
         progressBar.setVisibility(View.VISIBLE);
-        tvStatus.setText("正在获取云端授权...");
+        tvStatus.setText("正在Hook RegisterNatives并调用JNI_OnLoad...");
         tvStatus.setTextColor(getResColor(R.color.text_secondary));
 
-        // 先调用云函数获取加密数据
-        callCloudForData(handle);
+        // 直接 Hook RegisterNatives → 调用 JNI_OnLoad → 捕获动态注册函数
+        executeHook(handle, "JNI_OnLoad", "256", "4096");
     }
 
     private void callCloudForData(long handle) {

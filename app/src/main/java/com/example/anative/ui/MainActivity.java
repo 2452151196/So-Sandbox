@@ -1,4 +1,4 @@
-package com.example.anative.ui;
+﻿package com.example.anative.ui;
 
 import android.Manifest;
 import android.content.Intent;
@@ -833,56 +833,7 @@ public class MainActivity extends AppCompatActivity {
      * 启动时静默检测更新，有新版本才弹窗
      */
     private void checkForUpdateOnStart() {
-        SharedPreferences prefs = getSharedPreferences("update_prefs", MODE_PRIVATE);
-        long lastCheck = prefs.getLong("last_check_time", 0);
-        long now = System.currentTimeMillis();
-        // 每24小时最多检测一次
-        if (now - lastCheck < 24 * 60 * 60 * 1000L) return;
-
-        new Thread(() -> {
-            try {
-                java.net.URL url = new java.net.URL(UPDATE_URL);
-                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(8000);
-                conn.setReadTimeout(8000);
-
-                java.io.BufferedReader reader = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(conn.getInputStream()));
-                StringBuilder response = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    response.append(line);
-                }
-                reader.close();
-
-                org.json.JSONObject json = new org.json.JSONObject(response.toString());
-                String latestVersion = json.getString("tag_name").replace("v", "");
-                String releaseUrl = json.getString("html_url");
-                String releaseNotes = json.optString("body", "");
-
-                String currentVersion = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-                boolean hasUpdate = compareVersions(latestVersion, currentVersion) > 0;
-
-                prefs.edit().putLong("last_check_time", now).apply();
-
-                if (hasUpdate) {
-                    runOnUiThread(() -> {
-                        new AlertDialog.Builder(this)
-                                .setTitle("发现新版本")
-                                .setMessage("当前版本：v" + currentVersion + "\n最新版本：v" + latestVersion + "\n\n" + releaseNotes)
-                                .setPositiveButton("前往更新", (d, w) -> {
-                                    Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(releaseUrl));
-                                    startActivity(browserIntent);
-                                })
-                                .setNegativeButton("以后再说", null)
-                                .show();
-                    });
-                }
-            } catch (Exception e) {
-                Log.w("MainActivity", "更新检测失败: " + e.getMessage());
-            }
-        }).start();
+        // 项目已离线开源，不再检测更新
     }
 
     private int compareVersions(String v1, String v2) {
