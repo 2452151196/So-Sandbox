@@ -1,4 +1,4 @@
-﻿package com.example.anative.ui;
+package com.example.anative.ui;
 
 import android.app.AlertDialog;
 import android.content.Context;
@@ -345,13 +345,13 @@ public class SettingsActivity extends AppCompatActivity {
     private void showAboutDialog() {
         String message = "应用名称：" + getString(R.string.app_name)
                 + "\n版本：v" + getAppVersionName()
-                + "\n\n这是一个 SO 文件逆向分析工具。\n\n
-项目已完全离线开源，无需网络即可使用全部功能。\n
-后续更新随缘。\n\n
-开源地址：\nhttps://github.com/2452151196/So-Sandbox";
+                + "\n\n这是一个 SO 文件逆向分析工具。\n\n项目已完全离线开源，无需网络即可使用全部功能。\n后续更新随缘。\n\n开源地址：\nhttps://github.com/2452151196/So-Sandbox";
         new AlertDialog.Builder(this)
                 .setTitle("关于软件")
                 .setMessage(message)
+                .setPositiveButton("确定", null)
+                .show();
+    }
                 .setPositiveButton("确定", null)
                 .show();
     }
